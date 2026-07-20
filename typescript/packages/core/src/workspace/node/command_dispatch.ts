@@ -28,7 +28,7 @@ import {
 } from '../../shell/helpers.ts'
 import type { JobTable } from '../../shell/job_table.ts'
 import { NodeType as NT, ShellBuiltin as SB } from '../../shell/types.ts'
-import { PathSpec } from '../../types.ts'
+import { PathSpec, wordText } from '../../types.ts'
 import { classifyBarePath } from '../expand/classify/index.ts'
 import type { Argv } from '../expand/argv.ts'
 import { expandArgv } from '../expand/argv.ts'
@@ -38,6 +38,7 @@ import { handleCommand } from '../executor/command.ts'
 import { runWithTimeout } from '../../commands/builtin/utils/safeguard.ts'
 import { resolveSafeguard } from '../../commands/safeguard.ts'
 import { BreakSignal, ContinueSignal } from '../executor/control.ts'
+import { traceCommand } from '../../shell/xtrace.ts'
 import type { DispatchFn } from '../executor/cross_mount.ts'
 import {
   followPaths,
@@ -82,6 +83,15 @@ import { homeDir } from '../session/shell_dirs.ts'
 import { ExecutionNode } from '../types.ts'
 
 type Result = [ByteSource | null, IOResult, ExecutionNode]
+
+// Parse the optional numeric level of `break`/`continue`.
+function loopLevels(args: readonly string[]): number {
+  const first = args[0]
+  if (first !== undefined && /^\d+$/.test(first) && parseInt(first, 10) > 0) {
+    return parseInt(first, 10)
+  }
+  return 1
+}
 
 // Split leading `cd` option flags (-L -P -e -@, clusters like -LP, and a
 // `--` terminator) from the directory operand. A bare `-` is the OLDPWD
@@ -302,6 +312,9 @@ async function runCommandBody(
   // invocations get their real command's policy.
   const resolved = argv.name !== '' ? resolveSafeguard(argv.name) : null
   const timeout = resolved !== null ? resolved.timeoutSeconds : null
+  // Capture xtrace before the body runs so `set -x` itself is not
+  // traced (bash enables tracing only for the following commands).
+  const xtrace = session.shellOptions.xtrace === true
   const [stdout, io, execNode] = await runWithTimeout(
     runArgv(
       recurse,
@@ -327,6 +340,10 @@ async function runCommandBody(
     const stderr = await materialize(io.stderr)
     io.stderr = concatBytes([...procSubStderr, stderr])
     execNode.stderr = io.stderr
+  }
+  if (xtrace && argv.name !== '') {
+    const existing = await materialize(io.stderr)
+    io.stderr = concatBytes([traceCommand([argv.name, ...argv.args]), existing])
   }
   return [stdout, io, execNode]
 }
@@ -507,7 +524,22 @@ async function runArgv(
   }
   if (name === SB.TRAP) return handleTrap(session)
   if (name === SB.TEST || name === SB.BRACKET || name === SB.DOUBLE_BRACKET) {
-    return handleTest(dispatch, operands, session)
+    let testArgs = [...operands]
+    const testName = name === SB.BRACKET ? '[' : 'test'
+    if (name === SB.BRACKET) {
+      const last = testArgs[testArgs.length - 1]
+      if (last !== undefined && wordText(last) === ']') {
+        testArgs = testArgs.slice(0, -1)
+      } else {
+        const err = new TextEncoder().encode("[: missing `]'\n")
+        return [
+          null,
+          new IOResult({ exitCode: 2, stderr: err }),
+          new ExecutionNode({ command: '[', exitCode: 2, stderr: err }),
+        ]
+      }
+    }
+    return handleTest(dispatch, namespace, testArgs, session, testName)
   }
   if (name === SB.ECHO) {
     return handleEcho(args)
@@ -522,13 +554,13 @@ async function runArgv(
     return handleSource(dispatch, executeFn, target, session)
   }
   if (name === SB.RETURN) {
-    return handleReturn(args)
+    return handleReturn(args, session, callStack)
   }
   if (name === SB.EXIT) {
     return handleExit(args, session)
   }
-  if (name === SB.BREAK) throw new BreakSignal()
-  if (name === SB.CONTINUE) throw new ContinueSignal()
+  if (name === SB.BREAK) throw new BreakSignal(null, new IOResult(), loopLevels(args))
+  if (name === SB.CONTINUE) throw new ContinueSignal(null, new IOResult(), loopLevels(args))
 
   if (name === SB.XARGS) {
     return handleXargs(executeFn, args, session, stdin)

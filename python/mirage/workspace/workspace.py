@@ -1164,6 +1164,10 @@ class Workspace:
         # typed line is read, never inside the evaluator). Internal
         # evaluations and provision runs get an inert scope.
         is_line = record and not provision
+        if is_line:
+            # Each typed line reads stdin fresh; a buffer left behind by a
+            # previous line's read/select would otherwise serve EOF forever.
+            effective_session._stdin_buffer = None
         scope = RecordingScope(active=is_line)
 
         http_token = bind_shared_session(self._http_session.get)
@@ -1246,7 +1250,7 @@ class Workspace:
             io = IOResult(exit_code=1, stderr=msg)
             return io
         except Exception as exc:
-            io = IOResult(exit_code=1, stderr=str(exc).encode())
+            io = IOResult(exit_code=1, stderr=f"{exc}\n".encode())
             return io
         finally:
             # One rule on every path: an op that happened is always

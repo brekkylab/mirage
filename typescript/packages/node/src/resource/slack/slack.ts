@@ -54,7 +54,9 @@ export class SlackResource extends BaseResource implements Resource {
   constructor(config: SlackConfig) {
     super()
     this.config = config
-    this.accessor = new SlackAccessor(new NodeSlackTransport(config.token, config.searchToken))
+    this.accessor = new SlackAccessor(
+      new NodeSlackTransport(config.token, config.searchToken, config.baseUrl),
+    )
   }
 
   open(): Promise<void> {

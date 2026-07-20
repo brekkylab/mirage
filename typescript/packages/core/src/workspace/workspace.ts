@@ -1178,6 +1178,11 @@ export class Workspace {
     // with record:false: no new recording scope, so their ops land in the
     // caller's recorder, and no command entry is logged for them.
     const isLine = options.record !== false
+    if (isLine) {
+      // Each typed line reads stdin fresh; a buffer left behind by a
+      // previous line's read/select would otherwise serve EOF forever.
+      effectiveSession.stdinBuffer = null
+    }
     const lineRuntime = this.wholeLineRuntimeFor(rootNode, deps.routingDecision ?? null)
     if (lineRuntime?.runLine !== undefined) {
       const data = stdin !== null ? await materialize(stdin) : null

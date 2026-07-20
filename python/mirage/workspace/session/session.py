@@ -37,6 +37,13 @@ class Session:
     pipeline_timeout_seconds: float | None = None
     last_bg_job_id: int | None = None
     positional_args: list[str] = field(default_factory=list)
+    # Transient `set -e` marker: True when the failure just returned
+    # came from a short-circuited &&/|| branch or a `!`-negated command,
+    # which bash exempts from errexit. Reset on every node execution.
+    errexit_immune: bool = field(default=False, repr=False)
+    # Depth of nested `source`/`.` execution: `return` is legal and the
+    # program loop absorbs its signal only while a file is being sourced.
+    source_depth: int = field(default=0, repr=False)
     _stdin_buffer: AsyncLineIterator | None = field(default=None, repr=False)
     _stdin_source: object = field(default=None, repr=False)
     _local_vars: dict[str, str | None] | None = field(default=None, repr=False)

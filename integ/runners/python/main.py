@@ -88,6 +88,10 @@ async def main() -> None:
                 and not os.environ.get("EMAIL_HOST")):
             print(f"skip [{target_id}]: EMAIL_HOST not set", file=sys.stderr)
             continue
+        if (target.get("service") == "slack"
+                and not os.environ.get("SLACK_URL")):
+            print(f"skip [{target_id}]: SLACK_URL not set", file=sys.stderr)
+            continue
         await run_target(target, cases, root, report, emit)
 
     if args.emit:

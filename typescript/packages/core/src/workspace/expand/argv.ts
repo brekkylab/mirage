@@ -13,8 +13,7 @@
 // ========= Copyright 2026 @ Strukto.AI All Rights Reserved. =========
 
 import type { CallStack } from '../../shell/call_stack.ts'
-import type { PathSpec } from '../../types.ts'
-import { wordText } from '../../types.ts'
+import { PathSpec, wordText } from '../../types.ts'
 import type { MountRegistry } from '../mount/registry.ts'
 import { WordPolicy, route, wordPolicy } from '../route/index.ts'
 import type { Session } from '../session/session.ts'
@@ -99,7 +98,24 @@ export async function expandArgv(
     }
   }
 
-  const classified = classifyParts(expanded, registry, session.cwd, wordKinds)
+  let classified = classifyParts(expanded, registry, session.cwd, wordKinds)
+  // set -f: glob words become literal paths for every consumer,
+  // including backend pushdown, so `cat *.txt` looks up a file
+  // literally named `*.txt` like bash with noglob.
+  if (session.shellOptions.noglob === true) {
+    classified = classified.map((item) =>
+      item instanceof PathSpec && item.pattern !== null
+        ? new PathSpec({
+            virtual: item.virtual,
+            directory: item.directory,
+            pattern: null,
+            resolved: item.resolved,
+            resourcePath: item.resourcePath,
+            rawPath: item.rawPath,
+          })
+        : item,
+    )
+  }
   // A glob word is resolved by whoever consumes it, exactly once:
   // WordPolicy.SHELL words get matches here; mount commands keep
   // patterns for backend pushdown; unknown names fail without

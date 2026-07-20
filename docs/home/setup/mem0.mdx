@@ -1,0 +1,54 @@
+---
+title: Mem0
+icon: /images/mem0.svg
+description: Set up a Mem0 API key and memory scope for the Mem0 resource.
+---
+
+## Credentials
+
+Mirage uses the [Mem0 Platform](https://docs.mem0.ai) managed API. You need a
+Mem0 API key and one memory scope — a `user_id`, `agent_id`, or `run_id` — to
+mount.
+
+### 1. Get a Mem0 API Key
+
+1. Sign in to the [Mem0 dashboard](https://app.mem0.ai).
+1. Open **API Keys**.
+1. Create or copy a key (it starts with `m0-...`).
+
+The key is sent as a `Token` authorization header to the Mem0 API. Your
+organization and project are resolved from the key.
+
+### 2. Choose a Scope
+
+Mem0 stores each memory under a single entity. A Mirage mount is scoped to
+exactly one of:
+
+| Scope | Mem0 filter |
+| ----- | ----------- |
+| User | `user_id` |
+| Agent | `agent_id` |
+| Run / session | `run_id` |
+
+Set exactly one. Combining two (for example `user_id` **and** `agent_id`) is
+rejected, because a memory added with both is split into separate user-scoped
+and agent-scoped memories — a combined filter matches nothing.
+
+### 3. Set Environment Variables
+
+```bash
+# .env.development
+MEM0_API_KEY=m0-...
+MEM0_USER_ID=alex
+```
+
+For an agent or run scope, set `MEM0_AGENT_ID` or `MEM0_RUN_ID` instead of
+`MEM0_USER_ID`.
+
+For self-hosted or a custom host, set `MEM0_HOST`:
+
+```bash
+MEM0_HOST=https://api.mem0.ai
+```
+
+For Python configuration, see the [Python Mem0 Setup](/python/setup/mem0) guide.

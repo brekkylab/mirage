@@ -37,3 +37,35 @@ def test_env_prefix_to_command(shell):
 def test_ifs_colon_split(shell):
     out = shell.mirage('IFS=: read a b c <<< "x:y:z"; echo "$a-$b-$c"')
     assert out == "x-y-z\n"
+
+
+def test_read_trims_trailing_default_ifs_whitespace(shell):
+    out = shell.mirage('read a b <<< "  x  y  "; echo "[$b]"')
+    assert out == "[y]\n"
+
+
+def test_read_single_var_keeps_inner_whitespace(shell):
+    out = shell.mirage('read a <<< "  x  y  "; echo "[$a]"')
+    assert out == "[x  y]\n"
+
+
+def test_read_keeps_trailing_nonws_ifs_chars(shell):
+    out = shell.mirage('IFS=: read a b <<< "x:y:z:"; echo "[$b]"')
+    assert out == "[y:z:]\n"
+
+
+def test_read_single_var_nonws_ifs_intact(shell):
+    out = shell.mirage('IFS=: read a <<< ":x:"; echo "[$a]"')
+    assert out == "[:x:]\n"
+
+
+def test_read_rebinds_stdin_on_next_line(shell):
+    shell.mirage('read za <<< "first"')
+    out = shell.mirage('read zb <<< "second"; echo "$zb"')
+    assert out == "second\n"
+
+
+def test_read_pipe_after_previous_line(shell):
+    shell.mirage("printf 'a\\n' | { read z1; echo $z1; }")
+    out = shell.mirage("printf 'b\\n' | { read z2; echo $z2; }")
+    assert out == "b\n"

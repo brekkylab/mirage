@@ -22,8 +22,6 @@ from mirage.core.http_session import current_http_session
 from mirage.resource.secrets import reveal_secret
 from mirage.resource.slack.config import SlackConfig
 
-SLACK_API = "https://slack.com/api"
-
 
 @asynccontextmanager
 async def _session_scope() -> AsyncIterator[aiohttp.ClientSession]:
@@ -75,7 +73,7 @@ async def slack_get(
     method: str,
     params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    url = f"{SLACK_API}/{method}"
+    url = f"{config.base_url.rstrip('/')}/{method}"
     headers = slack_headers(config, method)
     async with _session_scope() as session:
         async with session.get(url, headers=headers, params=params) as resp:
@@ -90,7 +88,7 @@ async def slack_post(
     method: str,
     body: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    url = f"{SLACK_API}/{method}"
+    url = f"{config.base_url.rstrip('/')}/{method}"
     headers = slack_headers(config, method)
     async with _session_scope() as session:
         async with session.post(url, headers=headers, json=body or {}) as resp:

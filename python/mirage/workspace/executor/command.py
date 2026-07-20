@@ -20,7 +20,10 @@ from mirage.commands.builtin.find_parse import (FindParseError, find_expr_tail,
                                                 parse_find_expression)
 from mirage.commands.builtin.generic.crossmount import (handle_cross_mount,
                                                         is_cross_mount)
-from mirage.commands.builtin.utils.safeguard import maybe_with_timeout
+from mirage.commands.builtin.generic.crossmount.detect import strategy_for
+from mirage.commands.builtin.generic.crossmount.types import Strategy
+from mirage.commands.builtin.utils.safeguard import (CommandTimeoutError,
+                                                     maybe_with_timeout)
 from mirage.commands.errors import UsageError
 from mirage.commands.safeguard import resolve_across_mounts, resolve_safeguard
 from mirage.commands.spec import (SPECS, CommandSpec, OperandKind,
@@ -38,13 +41,15 @@ from mirage.shell.call_stack import CallStack
 from mirage.shell.job_table import JobTable
 from mirage.shell.types import ERREXIT_EXEMPT_TYPES
 from mirage.types import FileStat, PathSpec, word_text
-from mirage.utils.errors import FS_ERRORS, format_fs_error
+from mirage.utils.errors import format_fs_error
 from mirage.workspace.executor.control import ReturnSignal
 from mirage.workspace.executor.fanout import (_fan_out_traversal,
                                               _should_fan_out)
 from mirage.workspace.executor.find_action_dispatch import _apply_find_actions
-from mirage.workspace.executor.jobs import (handle_jobs, handle_kill,
-                                            handle_ps, handle_wait)
+from mirage.workspace.executor.jobs import (handle_fg, handle_jobs,
+                                            handle_kill, handle_ps,
+                                            handle_wait)
+from mirage.workspace.expand.globs import resolve_globs
 from mirage.workspace.mount import (MountCommandUnsupported, MountEntry,
                                     MountRegistry)
 from mirage.workspace.mount.namespace import Namespace
@@ -302,9 +307,17 @@ async def run_on_mount(
         # running, like a real shell (#452).
         return None, IOResult(exit_code=exc.exit_code,
                               stderr=f"{exc}\n".encode())
-    except FS_ERRORS as exc:
-        err = format_fs_error(cmd_name, exc, paths)
-        return None, IOResult(exit_code=1, stderr=err)
+    except CommandTimeoutError:
+        # A safeguard timeout is answered by the workspace-level handler
+        # (exit 124), not here.
+        raise
+    except Exception as exc:
+        # Every other thrown command error (a backend RuntimeError, a
+        # ValueError, or a filesystem OSError) becomes this command's
+        # IOResult, prefixed with the command name like GNU (prog: message)
+        # and the TypeScript executor.
+        return None, IOResult(exit_code=1,
+                              stderr=format_fs_error(cmd_name, exc, paths))
 
     if cmd_name == "ls" and io.exit_code == 0:
         stdout = await _inject_child_mounts(stdout, registry, paths,
@@ -501,8 +514,10 @@ async def handle_command(
         text_parts = [
             p.virtual if isinstance(p, PathSpec) else p for p in parts
         ]
-        if cmd_name in ("wait", "fg"):
+        if cmd_name == "wait":
             return await handle_wait(job_table, text_parts)
+        if cmd_name == "fg":
+            return await handle_fg(job_table, text_parts)
         if cmd_name == "kill":
             return await handle_kill(job_table, text_parts)
         if cmd_name == "jobs":
@@ -536,8 +551,12 @@ async def handle_command(
                 if stdout is not None:
                     all_stdout.append(stdout)
                 merged_io = await merged_io.merge(io)
+                # $? tracks each statement inside the body, so a bare
+                # `return` (and mid-function $?) sees the last command.
+                session.last_exit_code = io.exit_code
                 if (io.exit_code != 0 and session.shell_options.get("errexit")
-                        and cmd.type not in ERREXIT_EXEMPT_TYPES):
+                        and cmd.type not in ERREXIT_EXEMPT_TYPES
+                        and not session.errexit_immune):
                     merged_io.exit_code = io.exit_code
                     break
             combined = async_chain(*all_stdout) if all_stdout else None
@@ -609,6 +628,14 @@ async def handle_command(
                                       command=cmd_str,
                                       exit_code=code,
                                       stderr=refusal_msg)
+        cross_scopes = path_scopes
+        if strategy_for(cmd_name, cross_parsed.flag_kwargs) is Strategy.RELAY:
+            # STREAM and FANOUT run each operand natively on its mount, which
+            # expands the operand's glob. RELAY bypasses the mount command
+            # wrappers entirely, so its glob operands must expand here; an
+            # unmatched glob stays the literal word, like bash.
+            expanded = await resolve_globs(list(path_scopes), registry)
+            cross_scopes = [p for p in expanded if isinstance(p, PathSpec)]
         run_single = functools.partial(run_on_mount,
                                        registry,
                                        session,
@@ -616,7 +643,7 @@ async def handle_command(
                                        namespace,
                                        routing_decision=routing_decision)
         stdout, io = await handle_cross_mount(cmd_name,
-                                              path_scopes,
+                                              cross_scopes,
                                               cross_texts,
                                               cross_parsed.flag_kwargs,
                                               dispatch,

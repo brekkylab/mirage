@@ -1122,9 +1122,12 @@ export {
   eisdir,
   enoent,
   enotdir,
+  enotsup,
   errorVirtualPath,
   type FsError,
   gnuStrerror,
+  isMissingOp,
+  type MissingOpError,
 } from './utils/errors.ts'
 
 export {

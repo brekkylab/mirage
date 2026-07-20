@@ -133,6 +133,53 @@ async def handle_wait(
     ), ExecutionNode(command=cmd_str, exit_code=job.exit_code)
 
 
+async def handle_fg(
+    job_table: JobTable,
+    parts: list[str],
+) -> tuple[ByteSource | None, IOResult, ExecutionNode]:
+    """Foreground a background job: print its command line, then block
+    on it and adopt its output and exit code.
+
+    Args:
+        job_table (JobTable): the session's job table.
+        parts (list[str]): argv including the command name; the
+            optional operand is a job id, with or without ``%``.
+    """
+    cmd_str = " ".join(parts)
+    if len(parts) <= 1:
+        running = job_table.running_jobs()
+        if not running:
+            err = b"fg: current: no such job\n"
+            return None, IOResult(exit_code=1,
+                                  stderr=err), ExecutionNode(command=cmd_str,
+                                                             exit_code=1,
+                                                             stderr=err)
+        job_id = running[-1].id
+    else:
+        raw = parts[1].lstrip("%")
+        try:
+            job_id = int(raw)
+        except ValueError:
+            err = f"fg: {parts[1]}: no such job\n".encode()
+            return None, IOResult(exit_code=1,
+                                  stderr=err), ExecutionNode(command=cmd_str,
+                                                             exit_code=1,
+                                                             stderr=err)
+        if job_table.get(job_id) is None:
+            err = f"fg: {parts[1]}: no such job\n".encode()
+            return None, IOResult(exit_code=1,
+                                  stderr=err), ExecutionNode(command=cmd_str,
+                                                             exit_code=1,
+                                                             stderr=err)
+    job = await job_table.wait(job_id)
+    header = (job.command + "\n").encode()
+    stdout = header + (job.stdout or b"")
+    return stdout, IOResult(
+        exit_code=job.exit_code,
+        stderr=job.stderr or None,
+    ), ExecutionNode(command=cmd_str, exit_code=job.exit_code)
+
+
 async def handle_kill(
     job_table: JobTable,
     parts: list[str],

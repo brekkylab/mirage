@@ -22,7 +22,8 @@ from mirage.io.types import materialize
 from mirage.runtime.route import RoutingDecision
 from mirage.shell.types import NodeType as NT
 from mirage.shell.types import ShellBuiltin as SB
-from mirage.types import PathSpec
+from mirage.shell.xtrace import trace_command
+from mirage.types import PathSpec, word_text
 from mirage.utils.path import CycleError
 from mirage.workspace.executor.command import handle_command
 from mirage.workspace.executor.control import BreakSignal, ContinueSignal
@@ -46,6 +47,17 @@ from mirage.workspace.executor.builtins import (  # isort: skip
     prepare_mv, strip_link_operands)
 
 _CdArgs = list[str | PathSpec]
+
+
+def _loop_levels(args: list[str]) -> int:
+    """Parse the optional numeric level of ``break``/``continue``.
+
+    Args:
+        args (list[str]): words after the builtin name.
+    """
+    if args and args[0].isdigit() and int(args[0]) > 0:
+        return int(args[0])
+    return 1
 
 
 def _split_cd_options(args: _CdArgs) -> tuple[_CdArgs, str | None, bool]:
@@ -216,11 +228,17 @@ async def _dispatch_command_body(
     body = _run_argv(recurse, dispatch, registry, namespace, execute_fn, argv,
                      session, stdin, call_stack, job_table, cancel,
                      routing_decision)
+    # Capture xtrace before the body runs so `set -x` itself is not
+    # traced (bash enables tracing only for the following commands).
+    xtrace = bool(session.shell_options.get("xtrace"))
     stdout, io, exec_node = await run_with_timeout(body, timeout, argv.name
                                                    or "?")
     if proc_sub_stderr:
         io.stderr = b"".join(proc_sub_stderr) + await materialize(io.stderr)
         exec_node.stderr = io.stderr
+    if xtrace and argv.name:
+        existing = await materialize(io.stderr) or b""
+        io.stderr = trace_command([argv.name, *argv.args]) + existing
     return stdout, io, exec_node
 
 
@@ -373,7 +391,22 @@ async def _run_argv(
         return await handle_trap(session)
 
     if name in (SB.TEST, SB.BRACKET, SB.DOUBLE_BRACKET):
-        return await handle_test(dispatch, operands, session)
+        test_args = list(operands)
+        test_name = "[" if name == SB.BRACKET else "test"
+        if name == SB.BRACKET:
+            if test_args and word_text(test_args[-1]) == "]":
+                test_args = test_args[:-1]
+            else:
+                err = b"[: missing `]'\n"
+                return None, IOResult(exit_code=2,
+                                      stderr=err), ExecutionNode(command="[",
+                                                                 exit_code=2,
+                                                                 stderr=err)
+        return await handle_test(dispatch,
+                                 namespace,
+                                 test_args,
+                                 session,
+                                 name=test_name)
 
     if name == SB.ECHO:
         return await handle_echo(args)
@@ -385,7 +418,7 @@ async def _run_argv(
         return await handle_sleep(args, cancel=cancel)
 
     if name == SB.RETURN:
-        return await handle_return(args)
+        return await handle_return(args, session, call_stack)
 
     if name == SB.EXIT:
         return await handle_exit(args, session)
@@ -397,10 +430,10 @@ async def _run_argv(
         return await handle_timeout(execute_fn, args, session)
 
     if name == SB.BREAK:
-        raise BreakSignal()
+        raise BreakSignal(levels=_loop_levels(args))
 
     if name == SB.CONTINUE:
-        raise ContinueSignal()
+        raise ContinueSignal(levels=_loop_levels(args))
 
     # ── symlinks (namespace-backed; not bash builtins, not mount
     #    commands: they mutate the addressing layer) ──

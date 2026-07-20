@@ -1483,7 +1483,7 @@
       ],
       "command": "grep hello /data/a.txt /data/sub",
       "expect": {
-        "exit": 0,
+        "exit": 1,
         "stdout": "/data/a.txt:hello\n",
         "stderr": "grep: /data/sub: Is a directory\n"
       }

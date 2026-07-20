@@ -161,6 +161,9 @@ REGISTRY: dict[str, ResourceEntry] = {
     "dify":
     ResourceEntry("mirage.resource.dify:DifyResource",
                   "mirage.resource.dify:DifyConfig"),
+    "mem0":
+    ResourceEntry("mirage.resource.mem0:Mem0Resource",
+                  "mirage.resource.mem0:Mem0Config"),
     "chroma":
     ResourceEntry("mirage.resource.chroma:ChromaResource",
                   "mirage.resource.chroma:ChromaConfig"),

@@ -4,6 +4,7 @@ import pytest
 
 from mirage import MountMode, RAMResource, Workspace
 from mirage.io.stream import materialize
+from mirage.shell.call_stack import CallStack
 from mirage.shell.errors import ExitSignal
 from mirage.workspace.executor.builtins.vars import (handle_exit, handle_read,
                                                      handle_return,
@@ -42,10 +43,16 @@ async def test_shift_default_one():
     assert session.positional_args == ["b"]
 
 
+def make_function_stack() -> CallStack:
+    cs = CallStack()
+    cs.push([], function_name="f")
+    return cs
+
+
 @pytest.mark.asyncio
 async def test_return_non_numeric_raises_2_with_message():
     with pytest.raises(ReturnSignal) as exc:
-        await handle_return(["x"])
+        await handle_return(["x"], make_session(), make_function_stack())
     assert exc.value.exit_code == 2
     assert exc.value.stderr == b"return: x: numeric argument required\n"
 
@@ -53,9 +60,43 @@ async def test_return_non_numeric_raises_2_with_message():
 @pytest.mark.asyncio
 async def test_return_numeric():
     with pytest.raises(ReturnSignal) as exc:
-        await handle_return(["7"])
+        await handle_return(["7"], make_session(), make_function_stack())
     assert exc.value.exit_code == 7
     assert exc.value.stderr == b""
+
+
+@pytest.mark.asyncio
+async def test_return_bare_propagates_last_exit_code():
+    session = make_session()
+    session.last_exit_code = 1
+    with pytest.raises(ReturnSignal) as exc:
+        await handle_return([], session, make_function_stack())
+    assert exc.value.exit_code == 1
+
+
+@pytest.mark.asyncio
+async def test_return_outside_function_fails_without_signal():
+    _, io, _ = await handle_return([], make_session(), CallStack())
+    assert io.exit_code == 2
+    assert b"can only `return'" in io.stderr
+
+
+@pytest.mark.asyncio
+async def test_return_in_source_raises_signal():
+    session = make_session()
+    session.source_depth = 1
+    session.last_exit_code = 0
+    with pytest.raises(ReturnSignal) as exc:
+        await handle_return([], session, None)
+    assert exc.value.exit_code == 0
+
+
+@pytest.mark.asyncio
+async def test_return_too_many_args_fails_without_signal():
+    _, io, _ = await handle_return(["1", "2"], make_session(),
+                                   make_function_stack())
+    assert io.exit_code == 1
+    assert io.stderr == b"return: too many arguments\n"
 
 
 @pytest.mark.asyncio

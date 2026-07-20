@@ -24,8 +24,10 @@ from mirage.shell.barrier import BarrierPolicy, apply_barrier
 from mirage.shell.call_stack import CallStack
 from mirage.shell.errors import ExitSignal
 from mirage.shell.helpers import get_text
+from mirage.shell.job_table import JobTable
 from mirage.shell.types import ERREXIT_EXEMPT_TYPES
 from mirage.shell.types import NodeType as NT
+from mirage.workspace.executor.jobs import handle_background
 from mirage.workspace.session import Session
 from mirage.workspace.types import ExecutionNode
 
@@ -153,6 +155,9 @@ async def handle_connection(
                                          BarrierPolicy.VALUE)
         session.last_exit_code = left_io.exit_code
         if left_io.exit_code != 0:
+            # The failing command is left of the final `&&`, which bash
+            # exempts from `set -e`.
+            session.errexit_immune = True
             return left_bytes, left_io, ExecutionNode(
                 op="&&", exit_code=left_io.exit_code, children=children)
         try:
@@ -214,8 +219,24 @@ async def handle_subshell(
     session: Session,
     stdin: ByteSource | None = None,
     call_stack: CallStack | None = None,
+    job_table: JobTable | None = None,
+    agent_id: str | None = None,
 ) -> tuple[ByteSource | None, IOResult, ExecutionNode]:
-    """Execute body in isolated env."""
+    """Execute body in isolated env.
+
+    Args:
+        execute_node (Callable): recursion bound to the subshell's own
+            job table, so `wait`/`kill`/`jobs` inside see its jobs.
+        body (list[tree_sitter.Node]): ALL subshell children, including
+            the `&` tokens that mark background statements (named-only
+            lists would run `a & b` synchronously and never set `$!`).
+        session (Session): shell session; env/options snapshot-restored.
+        stdin (ByteSource | None): input stream.
+        call_stack (CallStack | None): function-call scope, if any.
+        job_table (JobTable | None): the subshell's private job table
+            (bash forks: the parent's table never sees these jobs).
+        agent_id (str | None): agent identity for job bookkeeping.
+    """
     saved_cwd = session.cwd
     saved_env = dict(session.env)
     saved_options = dict(session.shell_options)
@@ -228,7 +249,23 @@ async def handle_subshell(
         all_stdout: list[Any] = []
         merged_io = IOResult()
         last_exec = ExecutionNode(command="()", exit_code=0)
-        for child in body:
+        i = 0
+        while i < len(body):
+            child = body[i]
+            if not child.is_named or child.type == NT.COMMENT:
+                i += 1
+                continue
+            is_bg = (i + 1 < len(body) and body[i + 1].type == NT.BACKGROUND)
+            if is_bg and job_table is not None:
+                stdout, io, last_exec = await handle_background(
+                    execute_node, child, None, session, job_table, agent_id
+                    or "", stdin, call_stack)
+                merged_io = await merged_io.merge(io)
+                if stdout is not None:
+                    all_stdout.append(stdout)
+                i += 2
+                continue
+            i += 1
             try:
                 stdout, io, last_exec = await execute_node(
                     child, session, stdin, call_stack)
@@ -249,7 +286,8 @@ async def handle_subshell(
                 all_stdout.append(stdout)
             merged_io = await merged_io.merge(io)
             if (io.exit_code != 0 and session.shell_options.get("errexit")
-                    and child.type not in ERREXIT_EXEMPT_TYPES):
+                    and child.type not in ERREXIT_EXEMPT_TYPES
+                    and not session.errexit_immune):
                 merged_io.exit_code = io.exit_code
                 break
         if len(all_stdout) == 1:

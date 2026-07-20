@@ -12,7 +12,21 @@
 # limitations under the License.
 # ========= Copyright 2026 @ Strukto.AI All Rights Reserved. =========
 
+import errno
+
 from mirage.types import PathSpec
+
+
+class OperationNotSupportedError(OSError):
+    """A mount was asked for an op its backend does not register.
+
+    Raised at the op-resolution boundary (``Mount.execute_op``) so a
+    capability gap surfaces as a recoverable filesystem error
+    (ENOTSUP, "Operation not supported") instead of an internal
+    AttributeError: GNU-wise the backend behaves like a filesystem
+    that does not allow the operation.
+    """
+
 
 _FS_STRERROR: list[tuple[type[OSError], str]] = [
     (FileNotFoundError, "No such file or directory"),
@@ -20,6 +34,7 @@ _FS_STRERROR: list[tuple[type[OSError], str]] = [
     (IsADirectoryError, "Is a directory"),
     (FileExistsError, "File exists"),
     (PermissionError, "Permission denied"),
+    (OperationNotSupportedError, "Operation not supported"),
 ]
 
 # The recoverable per-operand filesystem errors: every catch site that
@@ -43,6 +58,24 @@ def enotdir(path: object) -> NotADirectoryError:
 
 def eisdir(path: object) -> IsADirectoryError:
     return IsADirectoryError(_virtual_of(path))
+
+
+def enotsup(resource: str, op_name: str,
+            path: object) -> OperationNotSupportedError:
+    """Missing-capability error for an op a backend does not register.
+
+    ``filename`` carries the virtual path so ``format_fs_error`` reports
+    the operand, while the strerror text keeps the resource and op name
+    for raw tracebacks.
+
+    Args:
+        resource (str): Resource name of the mount that lacks the op.
+        op_name (str): The unresolvable op (e.g. ``unlink``).
+        path (object): The operand; ``virtual`` is the reported spelling.
+    """
+    return OperationNotSupportedError(errno.ENOTSUP,
+                                      f"{resource}: no op {op_name!r}",
+                                      _virtual_of(path))
 
 
 def fs_strerror(exc: BaseException) -> str | None:
@@ -75,24 +108,35 @@ def fs_error_line(cmd_name: str, path: object, exc: BaseException) -> str:
 
 
 def format_fs_error(cmd_name: str,
-                    exc: OSError,
+                    exc: Exception,
                     paths: list[PathSpec] | None = None) -> bytes:
-    """Format a filesystem OSError as a GNU coreutils stderr line.
+    """Format a thrown command error as a GNU coreutils stderr line.
 
     The chokepoint variant of ``fs_error_line`` for callers that only hold
-    the exception: the path is recovered from it (``exc.filename`` when set,
-    else ``str(exc)``); backends raise with the resolved absolute path
-    (``PathSpec.virtual``). When ``paths`` is supplied, the absolute path is
-    rewritten to the as-typed form (``PathSpec.raw_path``) so a relative
-    argument is reported as typed, like GNU.
+    the exception, byte-identical with the TypeScript ``formatFsError``. A
+    recognized filesystem error becomes ``<cmd>: <path>: <strerror>`` (the
+    path is recovered from ``exc.filename`` when set, else ``str(exc)``;
+    backends raise with the resolved absolute path, and ``paths`` rewrites it
+    to the as-typed ``PathSpec.raw_path`` so a relative argument is reported
+    as typed, like GNU). Any other exception becomes the generic
+    ``<cmd>: <message>`` line, so a command that throws is reported with the
+    ``prog: message`` prefix GNU and the TypeScript executor both use. A
+    message that already carries the ``<cmd>: `` prefix (many generic
+    commands raise a fully GNU-formatted string, e.g. ``uniq: invalid
+    count``) is emitted verbatim so the prefix is not doubled.
 
     Args:
         cmd_name (str): Command name for the ``<cmd>:`` prefix.
-        exc (OSError): The filesystem error.
+        exc (Exception): The thrown error.
         paths (list[PathSpec] | None): Command operands, used to map the
             resolved path back to the as-typed form.
     """
-    path = exc.filename or str(exc)
+    if fs_strerror(exc) is None:
+        message = str(exc)
+        if message.startswith(f"{cmd_name}: "):
+            return f"{message}\n".encode()
+        return f"{cmd_name}: {message}\n".encode()
+    path = getattr(exc, "filename", None) or str(exc)
     if paths:
         for p in paths:
             if p.virtual == path:

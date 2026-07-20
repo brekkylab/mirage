@@ -47,22 +47,26 @@ const MAX_WHILE = 10_000
 export class BreakSignal extends Error {
   readonly stdout: ByteSource | null
   readonly io: IOResult
-  constructor(stdout: ByteSource | null = null, io: IOResult = new IOResult()) {
+  readonly levels: number
+  constructor(stdout: ByteSource | null = null, io: IOResult = new IOResult(), levels = 1) {
     super('break')
     this.name = 'BreakSignal'
     this.stdout = stdout
     this.io = io
+    this.levels = levels
   }
 }
 
 export class ContinueSignal extends Error {
   readonly stdout: ByteSource | null
   readonly io: IOResult
-  constructor(stdout: ByteSource | null = null, io: IOResult = new IOResult()) {
+  readonly levels: number
+  constructor(stdout: ByteSource | null = null, io: IOResult = new IOResult(), levels = 1) {
     super('continue')
     this.name = 'ContinueSignal'
     this.stdout = stdout
     this.io = io
+    this.levels = levels
   }
 }
 
@@ -85,7 +89,8 @@ async function executeBody(
       if (
         io.exitCode !== 0 &&
         session.shellOptions.errexit === true &&
-        !ERREXIT_EXEMPT_TYPES.has(cmd.type)
+        !ERREXIT_EXEMPT_TYPES.has(cmd.type) &&
+        !session.errexitImmune
       ) {
         mergedIo.exitCode = io.exitCode
         break
@@ -95,13 +100,13 @@ async function executeBody(
         if (sig.stdout !== null) allStdout.push(sig.stdout)
         mergedIo = await mergedIo.merge(sig.io)
         const combined = chainNonNull(allStdout)
-        throw new BreakSignal(combined, mergedIo)
+        throw new BreakSignal(combined, mergedIo, sig.levels)
       }
       if (sig instanceof ContinueSignal) {
         if (sig.stdout !== null) allStdout.push(sig.stdout)
         mergedIo = await mergedIo.merge(sig.io)
         const combined = chainNonNull(allStdout)
-        throw new ContinueSignal(combined, mergedIo)
+        throw new ContinueSignal(combined, mergedIo, sig.levels)
       }
       throw sig
     }
@@ -177,11 +182,17 @@ export async function handleFor(
         if (sig instanceof BreakSignal) {
           if (sig.stdout !== null) allStdout.push(sig.stdout)
           mergedIo = await mergedIo.merge(sig.io)
+          if (sig.levels > 1) {
+            throw new BreakSignal(chainNonNull(allStdout), mergedIo, sig.levels - 1)
+          }
           break
         }
         if (sig instanceof ContinueSignal) {
           if (sig.stdout !== null) allStdout.push(sig.stdout)
           mergedIo = await mergedIo.merge(sig.io)
+          if (sig.levels > 1) {
+            throw new ContinueSignal(chainNonNull(allStdout), mergedIo, sig.levels - 1)
+          }
           continue
         }
         throw sig
@@ -237,11 +248,17 @@ async function conditionLoop(
           hitLimit = false
           if (sig.stdout !== null) allStdout.push(sig.stdout)
           mergedIo = await mergedIo.merge(sig.io)
+          if (sig.levels > 1) {
+            throw new BreakSignal(chainNonNull(allStdout), mergedIo, sig.levels - 1)
+          }
           break
         }
         if (sig instanceof ContinueSignal) {
           if (sig.stdout !== null) allStdout.push(sig.stdout)
           mergedIo = await mergedIo.merge(sig.io)
+          if (sig.levels > 1) {
+            throw new ContinueSignal(chainNonNull(allStdout), mergedIo, sig.levels - 1)
+          }
           continue
         }
         throw sig
@@ -320,7 +337,16 @@ export async function handleCase(
   return [null, new IOResult(), new ExecutionNode({ command: 'case', exitCode: 0 })]
 }
 
-export function handleSelect(
+/**
+ * Run bash's select loop: menu to stderr, choice read from stdin.
+ *
+ * Each iteration prompts with PS3's default `#? `, reads one line,
+ * stores it raw in REPLY, and sets the variable to the chosen value
+ * (empty for an out-of-range or non-numeric reply, like bash). An
+ * empty reply redisplays the menu without running the body; EOF ends
+ * the loop.
+ */
+export async function handleSelect(
   executeNode: ExecuteNodeFn,
   variable: string,
   values: readonly (string | PathSpec)[],
@@ -329,8 +355,73 @@ export function handleSelect(
   stdin: ByteSource | null = null,
   callStack: CallStack | null = null,
 ): Promise<Result> {
-  return handleFor(executeNode, variable, values, body, session, stdin, callStack).then(
-    ([stdout, io]) =>
-      [stdout, io, new ExecutionNode({ command: 'select', exitCode: io.exitCode })] as Result,
+  let mergedIo = new IOResult()
+  const allStdout: (ByteSource | null)[] = []
+  const savedValue = session.env[variable]
+  const hadKey = variable in session.env
+  const [prevBuffer, bodyStdin] = installStdinBuffer(session, stdin)
+  stdin = bodyStdin
+
+  const menu = new TextEncoder().encode(
+    values.map((v, i) => `${(i + 1).toString()}) ${wordText(v)}\n`).join(''),
   )
+  mergedIo = await mergedIo.merge(new IOResult({ stderr: menu }))
+  try {
+    for (let i = 0; i < MAX_WHILE; i++) {
+      mergedIo = await mergedIo.merge(new IOResult({ stderr: new TextEncoder().encode('#? ') }))
+      const lineBytes = session.stdinBuffer !== null ? await session.stdinBuffer.readline() : null
+      if (lineBytes === null) {
+        // bash terminates the prompt line with a newline when the
+        // choice read hits EOF.
+        allStdout.push(new TextEncoder().encode('\n'))
+        break
+      }
+      const reply = new TextDecoder().decode(lineBytes).replace(/\n$/, '')
+      if (reply === '') {
+        mergedIo = await mergedIo.merge(new IOResult({ stderr: menu }))
+        continue
+      }
+      session.env.REPLY = reply
+      let choice = ''
+      if (/^\d+$/.test(reply.trim())) {
+        const idx = parseInt(reply.trim(), 10)
+        if (idx >= 1 && idx <= values.length) {
+          choice = wordText(values[idx - 1] ?? '')
+        }
+      }
+      session.env[variable] = choice
+      try {
+        const [stdout, io] = await executeBody(executeNode, body, session, null, callStack)
+        allStdout.push(stdout)
+        mergedIo = await mergedIo.merge(io)
+      } catch (sig) {
+        if (sig instanceof BreakSignal) {
+          if (sig.stdout !== null) allStdout.push(sig.stdout)
+          mergedIo = await mergedIo.merge(sig.io)
+          if (sig.levels > 1) {
+            throw new BreakSignal(chainNonNull(allStdout), mergedIo, sig.levels - 1)
+          }
+          break
+        }
+        if (sig instanceof ContinueSignal) {
+          if (sig.stdout !== null) allStdout.push(sig.stdout)
+          mergedIo = await mergedIo.merge(sig.io)
+          if (sig.levels > 1) {
+            throw new ContinueSignal(chainNonNull(allStdout), mergedIo, sig.levels - 1)
+          }
+          continue
+        }
+        throw sig
+      }
+    }
+  } finally {
+    if (hadKey && savedValue !== undefined) {
+      session.env[variable] = savedValue
+    } else {
+      // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
+      delete session.env[variable]
+    }
+    session.stdinBuffer = prevBuffer
+  }
+  return collectLoopResult(allStdout, mergedIo, 'select')
 }

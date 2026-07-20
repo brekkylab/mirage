@@ -162,10 +162,15 @@ async def handle_read(
     line = line_bytes.decode(errors="replace").rstrip("\n")
     ifs = session.env.get("IFS", " \t\n")
     if ifs == " \t\n":
+        # GNU trims IFS whitespace from both ends before splitting.
+        line = line.strip(" \t\n")
         parts = line.split(None, len(variables) - 1) if variables else []
     elif not ifs:
         parts = [line]
     else:
+        ifs_ws = "".join(ch for ch in ifs if ch in " \t\n")
+        if ifs_ws:
+            line = line.strip(ifs_ws)
         n_splits = max(0, len(variables) - 1)
         chars = set(ifs)
         out: list[str] = []
@@ -286,20 +291,43 @@ async def handle_trap(
 
 
 async def handle_return(
-        args: list[str],  # noqa: E125
+    args: list[str],
+    session: Session,
+    call_stack: CallStack | None = None,
 ) -> tuple[ByteSource | None, IOResult, ExecutionNode]:
-    """Return from a function, with bash's argument check.
+    """Return from a function or sourced script, with bash's checks.
 
     Args:
         args (list[str]): words after the command name; at most one,
             the return status.
+        session (Session): session whose last exit code is the default
+            status and whose source depth marks sourced execution.
+        call_stack (CallStack | None): active call stack; a pushed
+            frame marks function execution.
     """
+    in_function = call_stack is not None and call_stack.depth > 1
+    if not in_function and session.source_depth == 0:
+        # bash prints the diagnostic, sets $? to 2, and carries on with
+        # the rest of the line.
+        err = (b"return: can only `return' from a function "
+               b"or sourced script\n")
+        return None, IOResult(exit_code=2,
+                              stderr=err), ExecutionNode(command="return",
+                                                         exit_code=2,
+                                                         stderr=err)
     if args and not _is_shift_count(args[0]):
         # bash prints the error and the function returns 2.
         raise ReturnSignal(
             2,
             stderr=f"return: {args[0]}: numeric argument required\n".encode())
-    raise ReturnSignal(int(args[0]) if args else 0)
+    if len(args) > 1:
+        err = b"return: too many arguments\n"
+        return None, IOResult(exit_code=1,
+                              stderr=err), ExecutionNode(command="return",
+                                                         exit_code=1,
+                                                         stderr=err)
+    # A bare return propagates the status of the last command executed.
+    raise ReturnSignal(int(args[0]) % 256 if args else session.last_exit_code)
 
 
 async def handle_exit(

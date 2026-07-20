@@ -26,6 +26,7 @@
       "lancedb",
       "langfuse",
       "linear",
+      "mem0",
       "mongodb",
       "nextcloud",
       "notion",

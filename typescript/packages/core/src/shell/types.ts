@@ -51,6 +51,7 @@ export const NodeType = Object.freeze({
   RAW_STRING: 'raw_string',
   PROCESS_SUBSTITUTION: 'process_substitution',
   EXTGLOB_PATTERN: 'extglob_pattern',
+  REGEX: 'regex',
   DO_GROUP: 'do_group',
   ELIF_CLAUSE: 'elif_clause',
   ELSE_CLAUSE: 'else_clause',
@@ -114,10 +115,11 @@ export const NodeType = Object.freeze({
 
 export type NodeType = (typeof NodeType)[keyof typeof NodeType]
 
-export const ERREXIT_EXEMPT_TYPES: ReadonlySet<string> = new Set<string>([
-  NodeType.LIST,
-  NodeType.NEGATED_COMMAND,
-])
+// Node types whose failure never triggers `set -e` by shape alone.
+// Lists are NOT exempt: bash exits when the command after the final
+// `&&`/`||` fails; short-circuit failures set Session.errexitImmune
+// instead, so the executor loops skip only those.
+export const ERREXIT_EXEMPT_TYPES: ReadonlySet<string> = new Set<string>([NodeType.NEGATED_COMMAND])
 
 export const SET_FLAG_TO_OPTION: Readonly<Record<string, string>> = Object.freeze({
   e: 'errexit',

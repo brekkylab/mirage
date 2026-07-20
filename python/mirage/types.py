@@ -274,6 +274,7 @@ class ResourceName(str, Enum):
     GCS = "gcs"
     EMAIL = "email"
     DIFY = "dify"
+    MEM0 = "mem0"
     CHROMA = "chroma"
     DATABRICKS_VOLUME = "databricks_volume"
     HF_BUCKETS = "hf_buckets"

@@ -95,6 +95,20 @@ def test_cat_missing_file():
     assert io.exit_code != 0
 
 
+def test_thrown_command_error_prefixes_argv0(monkeypatch):
+    """A thrown command error is reported GNU-style: prog: message."""
+    ws = _ws()
+    mount = ws._registry.mount_for("/ram/notes.txt")
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(mount, "execute_cmd", boom)
+    io = _exec(ws, "cat /ram/notes.txt")
+    assert io.exit_code == 1
+    assert io.stderr == b"cat: kaboom\n"
+
+
 def test_ls_directory():
     ws = _ws()
     io = _exec(ws, "ls /disk/")

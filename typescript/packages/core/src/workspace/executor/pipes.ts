@@ -20,10 +20,11 @@ import { applyBarrier, BarrierPolicy } from '../../shell/barrier.ts'
 import type { CallStack } from '../../shell/call_stack.ts'
 import { ExitSignal } from '../../shell/errors.ts'
 import { ERREXIT_EXEMPT_TYPES, NodeType as NT } from '../../shell/types.ts'
+import type { JobTable } from '../../shell/job_table.ts'
 import type { Session } from '../session/session.ts'
 import type { TSNodeLike } from '../expand/variable.ts'
 import { ExecutionNode } from '../types.ts'
-import type { ExecuteNodeFn } from './jobs.ts'
+import { type ExecuteNodeFn, handleBackground } from './jobs.ts'
 
 type Result = [ByteSource | null, IOResult, ExecutionNode]
 
@@ -163,6 +164,9 @@ export async function handleConnection(
     const leftBytes = await applyBarrier(leftStdout, leftIo, BarrierPolicy.VALUE)
     session.lastExitCode = leftIo.exitCode
     if (leftIo.exitCode !== 0) {
+      // The failing command is left of the final `&&`, which bash
+      // exempts from `set -e`.
+      session.errexitImmune = true
       return [
         leftBytes,
         leftIo,
@@ -234,12 +238,24 @@ export async function handleConnection(
   ]
 }
 
+/**
+ * Execute body in isolated env.
+ *
+ * `body` is ALL subshell children, including the `&` tokens that mark
+ * background statements (named-only lists would run `a & b`
+ * synchronously and never set `$!`). Background jobs live in the
+ * subshell's private `jobTable` (bash forks: the parent's table never
+ * sees them), and `executeNode` is bound to that same table so
+ * `wait`/`kill`/`jobs` inside the body resolve against it.
+ */
 export async function handleSubshell(
   executeNode: ExecuteNodeFn,
   body: readonly TSNodeLike[],
   session: Session,
   stdin: ByteSource | null = null,
   callStack: CallStack | null = null,
+  jobTable: JobTable | null = null,
+  agentId: string | null = null,
 ): Promise<Result> {
   const savedCwd = session.cwd
   const savedEnv = { ...session.env }
@@ -254,7 +270,32 @@ export async function handleSubshell(
     const allStdout: ByteSource[] = []
     let mergedIo = new IOResult()
     let lastExec = new ExecutionNode({ command: '()', exitCode: 0 })
-    for (const child of body) {
+    let i = 0
+    while (i < body.length) {
+      const child = body[i]
+      if (child?.isNamed !== true || child.type === NT.COMMENT) {
+        i += 1
+        continue
+      }
+      const isBg = body[i + 1]?.type === NT.BACKGROUND
+      if (isBg && jobTable !== null) {
+        const [bgStdout, bgIo, bgExec] = await handleBackground(
+          executeNode,
+          child,
+          null,
+          session,
+          jobTable,
+          agentId ?? '',
+          stdin,
+          callStack,
+        )
+        if (bgStdout !== null) allStdout.push(bgStdout)
+        mergedIo = await mergedIo.merge(bgIo)
+        lastExec = bgExec
+        i += 2
+        continue
+      }
+      i += 1
       let stdout: ByteSource | null
       let io: IOResult
       let childExec: ExecutionNode
@@ -281,7 +322,8 @@ export async function handleSubshell(
       if (
         io.exitCode !== 0 &&
         session.shellOptions.errexit === true &&
-        !ERREXIT_EXEMPT_TYPES.has(child.type)
+        !ERREXIT_EXEMPT_TYPES.has(child.type) &&
+        !session.errexitImmune
       ) {
         mergedIo.exitCode = io.exitCode
         break

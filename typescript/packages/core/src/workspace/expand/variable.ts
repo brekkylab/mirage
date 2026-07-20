@@ -74,10 +74,34 @@ const PATTERN_OPS: ReadonlySet<string> = new Set([...REPLACE_OPS, ...STRIP_OPS, 
 
 const LITERAL_ARG_TYPES: ReadonlySet<string> = new Set([NT.WORD, NT.NUMBER, 'regex'])
 
-export function lookupVar(name: string, session: Session, callStack: CallStack | null): string {
+// Operators that handle unset themselves, so `set -u` must not fire
+// on the lookup that feeds them.
+const UNSET_GUARD_OPS: ReadonlySet<string> = new Set(['-', ':-', '+', ':+', '=', ':=', '?', ':?'])
+
+// GNU: fatal at top level with status 127; a containing
+// subshell/pipeline segment reports 1 (same shape as ${var:?}).
+function unbound(name: string): ExitSignal {
+  return new ExitSignal(127, new TextEncoder().encode(`bash: ${name}: unbound variable\n`), null, 1)
+}
+
+/**
+ * Resolve one variable name to its value.
+ *
+ * `strict` honors `set -u`: an unset plain name or positional raises;
+ * the defaulting operators (`:-` family) pass false because they handle
+ * unset themselves. Specials (`@ * # ? $ ! 0`) never raise, matching
+ * bash >= 4.4.
+ */
+export function lookupVar(
+  name: string,
+  session: Session,
+  callStack: CallStack | null,
+  strict = true,
+): string {
   const env = session.env
   const lastExitCode = session.lastExitCode
   const positional = session.positionalArgs
+  const nounset = strict && session.shellOptions.nounset === true
   if (name === '@' || name === '*') {
     if (callStack && callStack.getAllPositional().length > 0) {
       return callStack.getAllPositional().join(' ')
@@ -111,6 +135,7 @@ export function lookupVar(name: string, session: Session, callStack: CallStack |
       if (fromCall !== '') return fromCall
     }
     if (idx > 0 && idx <= positional.length) return positional[idx - 1] ?? ''
+    if (nounset) throw unbound(name)
     return ''
   }
   if (callStack) {
@@ -123,6 +148,10 @@ export function lookupVar(name: string, session: Session, callStack: CallStack |
   }
   if (name === 'PWD') return session.cwd
   if (name === 'HOME') return homeDir(session) ?? ''
+  if (!(name in env)) {
+    if (nounset) throw unbound(name)
+    return ''
+  }
   return env[name] ?? ''
 }
 
@@ -495,7 +524,7 @@ export async function expandBraces(
     if (!varInEnv) {
       // Specials, positionals, PWD/HOME fall back to the shared
       // lookup; set-ness follows value presence.
-      val = lookupVar(p.varName, session, callStack)
+      val = lookupVar(p.varName, session, callStack, p.op === null || !UNSET_GUARD_OPS.has(p.op))
       varInEnv = val !== ''
     }
   }

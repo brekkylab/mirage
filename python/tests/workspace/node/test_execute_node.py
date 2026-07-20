@@ -464,7 +464,8 @@ def test_trap():
 # ── return ──────────────────────────────────────
 
 
-def test_return_raises():
+def test_return_raises_inside_function_frame():
+    from mirage.shell.call_stack import CallStack
     from mirage.workspace.executor.control import ReturnSignal
 
     dispatch = _mock_dispatch()
@@ -473,22 +474,39 @@ def test_return_raises():
     execute_fn = AsyncMock(return_value=IOResult())
     session = _session()
     node = parse("return 42")
+    cs = CallStack()
+    cs.push([], function_name="f")
 
     try:
         _run(
             execute_node(dispatch, reg, job_table, execute_fn, "agent-1", node,
-                         session))
+                         session, None, cs))
         assert False, "should have raised ReturnSignal"
     except ReturnSignal as e:
         assert e.exit_code == 42
 
 
+def test_return_top_level_fails_and_continues():
+    dispatch = _mock_dispatch()
+    reg, _ = _mock_registry()
+    job_table = JobTable()
+    execute_fn = AsyncMock(return_value=IOResult())
+    session = _session()
+    node = parse("return 42")
+
+    _, io, _ = _run(
+        execute_node(dispatch, reg, job_table, execute_fn, "agent-1", node,
+                     session))
+    assert io.exit_code == 2
+    assert b"can only `return'" in io.stderr
+
+
 # ── break / continue ───────────────────────────
 
 
-def test_break_raises():
-    from mirage.workspace.executor.control import BreakSignal
-
+def test_break_outside_loop_absorbed():
+    """A stray top-level break is absorbed and execution continues,
+    like bash (which clamps break to the actual loop depth)."""
     dispatch = _mock_dispatch()
     reg, _ = _mock_registry()
     job_table = JobTable()
@@ -496,18 +514,13 @@ def test_break_raises():
     session = _session()
     node = parse("break")
 
-    try:
-        _run(
-            execute_node(dispatch, reg, job_table, execute_fn, "agent-1", node,
-                         session))
-        assert False, "should have raised BreakSignal"
-    except BreakSignal:
-        pass
+    _, io, _ = _run(
+        execute_node(dispatch, reg, job_table, execute_fn, "agent-1", node,
+                     session))
+    assert io.exit_code == 0
 
 
-def test_continue_raises():
-    from mirage.workspace.executor.control import ContinueSignal
-
+def test_continue_outside_loop_absorbed():
     dispatch = _mock_dispatch()
     reg, _ = _mock_registry()
     job_table = JobTable()
@@ -515,13 +528,10 @@ def test_continue_raises():
     session = _session()
     node = parse("continue")
 
-    try:
-        _run(
-            execute_node(dispatch, reg, job_table, execute_fn, "agent-1", node,
-                         session))
-        assert False, "should have raised ContinueSignal"
-    except ContinueSignal:
-        pass
+    _, io, _ = _run(
+        execute_node(dispatch, reg, job_table, execute_fn, "agent-1", node,
+                     session))
+    assert io.exit_code == 0
 
 
 # ── eval ────────────────────────────────────────
@@ -1376,15 +1386,16 @@ def test_for_mixed_glob_var_text():
 
 def test_select_glob_value():
     """select f in /data/*.csv → PathSpec original as value."""
-    _, _, _, session, _, _ = _exec(
-        "select f in /data/*.csv; do export GOT=$f; break; done")
+    _, _, _, session, _, _ = _exec_with_stdin(
+        "select f in /data/*.csv; do export GOT=$f; break; done", stdin=b"1\n")
     assert session.env["GOT"] == "/data/*.csv"
 
 
 def test_select_var_expanded():
-    """select f in $A $B → values expanded, break after first."""
-    _, _, _, session, _, _ = _exec(
+    """select f in $A $B → values expanded, choice 1 picks the first."""
+    _, _, _, session, _, _ = _exec_with_stdin(
         "select f in $A $B; do export LAST=$f; break; done",
+        stdin=b"1\n",
         env={
             "A": "first",
             "B": "second"
@@ -1685,10 +1696,10 @@ def test_while_continue_in_multi_body():
 
 
 def test_select_break_in_multi_body():
-    """select f in a b c; do export V=$f; break; done → breaks after first."""
-    _, _, _, session, _, _ = _exec(
-        "select f in a b c; do export V=$f; break; done")
-    assert session.env["V"] == "a"
+    """select f in a b c → choice 2 sets the variable, break ends it."""
+    _, _, _, session, _, _ = _exec_with_stdin(
+        "select f in a b c; do export V=$f; break; done", stdin=b"2\n")
+    assert session.env["V"] == "b"
 
 
 def test_for_multi_with_redirect():
@@ -2030,14 +2041,16 @@ def test_pipeline_stdin_flows_through():
 
 
 def test_select_stdin_materialized():
-    """select materializes stdin before iterating."""
+    """select reads its choice from stdin; a non-numeric reply sets
+    the variable empty and lands raw in REPLY, like bash."""
 
     async def _stream():
         yield b"choice\n"
 
     _, _, _, session, _, _ = _exec_with_stdin(
         "select f in a b; do export GOT=$f; break; done", stdin=_stream())
-    assert session.env["GOT"] == "a"
+    assert session.env["GOT"] == ""
+    assert session.env["REPLY"] == "choice"
 
 
 def test_for_with_cmd_using_stdin():

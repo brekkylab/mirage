@@ -1,1 +1,4 @@
 node_modules/
+prisma/generated/
+*.db
+*.db-journal

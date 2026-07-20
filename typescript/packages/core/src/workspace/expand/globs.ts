@@ -104,7 +104,11 @@ function matchRaw(item: PathSpec, match: PathSpec): PathSpec {
 export async function resolveGlobs(
   classified: readonly (string | PathSpec)[],
   registry: MountRegistry,
+  noglob = false,
 ): Promise<(string | PathSpec)[]> {
+  // set -f: skip resolution entirely, so every glob word keeps its
+  // literal spelling like a zero-match glob.
+  if (noglob) return [...classified]
   const result: (string | PathSpec)[] = []
   for (const item of classified) {
     if (item instanceof PathSpec && item.pattern !== null) {

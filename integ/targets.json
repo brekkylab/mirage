@@ -23,6 +23,12 @@
           "resource": "ram",
           "backend": "memory",
           "fixture": "columnar/v1"
+        },
+        {
+          "path": "/ro",
+          "resource": "ram",
+          "backend": "memory",
+          "mode": "read"
         }
       ]
     },
@@ -49,6 +55,12 @@
           "resource": "disk",
           "backend": "tmpdir",
           "fixture": "columnar/v1"
+        },
+        {
+          "path": "/ro",
+          "resource": "disk",
+          "backend": "tmpdir",
+          "mode": "read"
         }
       ]
     },
@@ -612,6 +624,11 @@
           "path": "/slides",
           "resource": "gslides",
           "backend": "gslides"
+        },
+        {
+          "path": "/scratch",
+          "resource": "ram",
+          "backend": "memory"
         }
       ]
     },
@@ -650,6 +667,61 @@
           "path": "/mail",
           "resource": "email",
           "backend": "email"
+        },
+        {
+          "path": "/scratch",
+          "resource": "ram",
+          "backend": "ram"
+        }
+      ]
+    },
+    {
+      "id": "slack",
+      "hosts": [
+        "python",
+        "typescript-node"
+      ],
+      "service": "slack",
+      "mounts": [
+        {
+          "path": "/slack",
+          "resource": "slack",
+          "backend": "slack"
+        }
+      ]
+    },
+    {
+      "id": "trello",
+      "hosts": [
+        "python",
+        "typescript-node"
+      ],
+      "service": "trello",
+      "mounts": [
+        {
+          "path": "/board",
+          "resource": "trello",
+          "backend": "trello"
+        },
+        {
+          "path": "/scratch",
+          "resource": "ram",
+          "backend": "ram"
+        }
+      ]
+    },
+    {
+      "id": "linear",
+      "hosts": [
+        "python",
+        "typescript-node"
+      ],
+      "service": "linear",
+      "mounts": [
+        {
+          "path": "/issues",
+          "resource": "linear",
+          "backend": "linear"
         },
         {
           "path": "/scratch",

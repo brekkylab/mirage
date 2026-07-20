@@ -182,6 +182,13 @@
                 ]
               },
               {
+                "group": "Memory",
+                "icon": "/images/mem0.svg",
+                "pages": [
+                  "home/setup/mem0"
+                ]
+              },
+              {
                 "group": "Notes",
                 "icon": "book",
                 "pages": [
@@ -348,6 +355,13 @@
                 "icon": "brain",
                 "pages": [
                   "python/resource/dify"
+                ]
+              },
+              {
+                "group": "Memory",
+                "icon": "/images/mem0.svg",
+                "pages": [
+                  "python/resource/mem0"
                 ]
               },
               {

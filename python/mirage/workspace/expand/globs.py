@@ -101,6 +101,7 @@ def _match_raw(item: PathSpec, match: PathSpec) -> PathSpec:
 async def resolve_globs(
     classified: list[str | PathSpec],
     registry: MountRegistry,
+    noglob: bool = False,
 ) -> list[str | PathSpec]:
     """Resolve glob patterns in PathSpec args, preserving PathSpec type.
 
@@ -113,7 +114,11 @@ async def resolve_globs(
         classified (list[str | PathSpec]): text arguments (str) and
             paths (PathSpec).
         registry (MountRegistry): mount registry.
+        noglob (bool): ``set -f`` — skip resolution entirely, so every
+            glob word keeps its literal spelling like a zero-match glob.
     """
+    if noglob:
+        return list(classified)
     result: list[str | PathSpec] = []
     for item in classified:
         if isinstance(item, PathSpec) and item.pattern:

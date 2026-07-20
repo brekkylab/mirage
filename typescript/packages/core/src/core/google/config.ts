@@ -27,9 +27,6 @@ export interface GoogleConfig {
   // token endpoint directly. Useful when the client_secret must stay on a
   // backend (e.g. a Vercel function proxy).
   refreshFn?: (refreshToken: string) => Promise<{ accessToken: string; expiresIn: number }>
-  // Single-host override for every Google API (drive/docs/sheets/slides)
-  // plus the OAuth token endpoint; used to point backends at a fake server.
-  apiBase?: string
   // Drive-only: scope the mount to this folder ID instead of the Drive
   // root, the s3 key_prefix analog. Other Google backends ignore it.
   folderId?: string
@@ -39,7 +36,6 @@ export interface GoogleConfigRedacted {
   clientId: string
   clientSecret?: '<REDACTED>'
   refreshToken: '<REDACTED>'
-  apiBase?: string
   folderId?: string
 }
 
@@ -47,7 +43,6 @@ export const GoogleConfigSchema = z.object({
   clientId: z.string(),
   clientSecret: secretStr().optional(),
   refreshToken: secretStr(),
-  apiBase: z.string().optional(),
   folderId: z.string().optional(),
 })
 
@@ -61,7 +56,6 @@ export function normalizeGoogleConfig(input: Record<string, unknown>): GoogleCon
       client_id: 'clientId',
       client_secret: 'clientSecret',
       refresh_token: 'refreshToken',
-      api_base: 'apiBase',
       folder_id: 'folderId',
     },
   }) as unknown as GoogleConfig

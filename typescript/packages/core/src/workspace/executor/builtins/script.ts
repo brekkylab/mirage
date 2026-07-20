@@ -156,8 +156,13 @@ export async function handleSource(
       new ExecutionNode({ command: `source ${raw}`, exitCode: 1 }),
     ]
   }
-  const io = await executeFn(script, { sessionId: session.sessionId })
-  return [io.stdout, io, new ExecutionNode({ command: `source ${raw}`, exitCode: io.exitCode })]
+  session.sourceDepth += 1
+  try {
+    const io = await executeFn(script, { sessionId: session.sessionId })
+    return [io.stdout, io, new ExecutionNode({ command: `source ${raw}`, exitCode: io.exitCode })]
+  } finally {
+    session.sourceDepth -= 1
+  }
 }
 
 // Finite non-negative decimals only ("0", "0.2", ".5", "1.", "+1", "1e-3").

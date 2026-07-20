@@ -171,24 +171,119 @@ describe('handleEcho', () => {
 })
 
 describe('handlePrintf', () => {
+  const run = (args: string[]): [string, number] => {
+    const [out, io] = handlePrintf(args)
+    return [decode(out as Uint8Array), io.exitCode]
+  }
+  const stdout = (args: string[]): string => {
+    const [text, code] = run(args)
+    expect(code).toBe(0)
+    return text
+  }
+
+  // Expectations verified byte-for-byte against GNU bash's builtin printf.
+  const CASES: [string[], string, number][] = [
+    [['%s\n', 'c', 'a', 'b'], 'c\na\nb\n', 0],
+    [['%d\n', '1', '2', '3'], '1\n2\n3\n', 0],
+    [['(%s,%s)', 'a', 'b', 'c'], '(a,b)(c,)', 0],
+    [['hello\n', 'a', 'b', 'c'], 'hello\n', 0],
+    [['%s=%d;', 'foo', '1', 'bar'], 'foo=1;bar=0;', 0],
+    [['a%%b\n'], 'a%b\n', 0],
+    [['[%s][%s]\n', 'x'], '[x][]\n', 0],
+    [['[%d][%d]\n', '5'], '[5][0]\n', 0],
+    [['[%-5s]', 'hi'], '[hi   ]', 0],
+    [['[%5s]', 'hi'], '[   hi]', 0],
+    [['[%.3s]', 'abcdef'], '[abc]', 0],
+    [['[%05d]', '42'], '[00042]', 0],
+    [['[%-05d]', '42'], '[42   ]', 0],
+    [['[%.0d]', '0'], '[]', 0],
+    [['[%+d]', '5'], '[+5]', 0],
+    [['[% d]', '-5'], '[-5]', 0],
+    [['[%o][%u][%x][%X]\n', '64', '64', '255', '255'], '[100][64][ff][FF]\n', 0],
+    [['%x\n', '-1'], 'ffffffffffffffff\n', 0],
+    [['%X\n', '-1'], 'FFFFFFFFFFFFFFFF\n', 0],
+    [['%o\n', '-1'], '1777777777777777777777\n', 0],
+    [['%u\n', '-1'], '18446744073709551615\n', 0],
+    [['%#x\n', '255'], '0xff\n', 0],
+    [['%#X\n', '255'], '0XFF\n', 0],
+    [['%#o\n', '64'], '0100\n', 0],
+    [['%#x\n', '0'], '0\n', 0],
+    [['%#o\n', '0'], '0\n', 0],
+    [['%08x\n', '255'], '000000ff\n', 0],
+    [['%d\n', '0x1f'], '31\n', 0],
+    [['%d\n', '010'], '8\n', 0],
+    [['%d\n', '"A'], '65\n', 0],
+    [['%d\n', "'Z"], '90\n', 0],
+    [['[%c]\n', 'abc'], '[a]\n', 0],
+    [['[%c%c]\n', 'xy', 'z'], '[xz]\n', 0],
+    [['[%b]\n', 'a\\tb'], '[a\tb]\n', 0],
+    [['[%b]\n', 'x\\101y'], '[xAy]\n', 0],
+    [['[%b]', 'ab\\ccd'], '[ab', 0],
+    [['[%*d]\n', '5', '42'], '[   42]\n', 0],
+    [['[%.*f]\n', '2', '3.14159'], '[3.14]\n', 0],
+    [['[%*.*f]\n', '10', '2', '3.14159'], '[      3.14]\n', 0],
+    [['[%*d]\n', '-5', '42'], '[42   ]\n', 0],
+    [['%.2f\n', '3.14159'], '3.14\n', 0],
+    [['%.0f\n', '0.5'], '0\n', 0],
+    [['%.0f\n', '1.5'], '2\n', 0],
+    [['%.0f\n', '2.5'], '2\n', 0],
+    [['%010.2f\n', '3.14'], '0000003.14\n', 0],
+    [['%#.0f\n', '3'], '3.\n', 0],
+    [['%e\n', '0'], '0.000000e+00\n', 0],
+    [['%.2e\n', '12345.678'], '1.23e+04\n', 0],
+    [['%g\n', '100000'], '100000\n', 0],
+    [['%g\n', '1000000'], '1e+06\n', 0],
+    [['%g\n', '0.0001'], '0.0001\n', 0],
+    [['%g\n', '0.00001'], '1e-05\n', 0],
+    [['%#g\n', '1.5'], '1.50000\n', 0],
+    [['x\\ty\\n'], 'x\ty\n', 0],
+    [['\\101\\n'], 'A\n', 0],
+    [['%d\n', 'abc'], '0\n', 1],
+    [['%d\n', '3.9'], '3\n', 1],
+  ]
+
+  it.each(CASES)('printf %j → %j', (args, expected, code) => {
+    expect(run(args)).toEqual([expected, code])
+  })
+
   it('empty args → empty output', () => {
     const [out] = handlePrintf([])
     expect((out as Uint8Array).byteLength).toBe(0)
   })
 
-  it('format string only → literal output', () => {
-    const [out] = handlePrintf(['hello'])
-    expect(decode(out as Uint8Array)).toBe('hello')
+  it('reuses the format for excess args, drops excess when no conversion', () => {
+    expect(stdout(['%s\n', 'c', 'a', 'b'])).toBe('c\na\nb\n')
+    expect(stdout(['hello\n', 'a', 'b', 'c'])).toBe('hello\n')
   })
 
-  it('%s substitution', () => {
-    const [out] = handlePrintf(['name=%s', 'alice'])
-    expect(decode(out as Uint8Array)).toBe('name=alice')
+  it('inf and nan', () => {
+    expect(stdout(['%f|%e|%g\n', 'inf', 'inf', 'inf'])).toBe('inf|inf|inf\n')
+    expect(stdout(['%f\n', '-inf'])).toBe('-inf\n')
+    expect(stdout(['%F|%G\n', 'nan', 'nan'])).toBe('NAN|NAN\n')
   })
 
-  it('\\n escape becomes newline in format', () => {
-    const [out] = handlePrintf(['a\\nb'])
-    expect(decode(out as Uint8Array)).toBe('a\nb')
+  it('%c of empty string is a NUL byte', () => {
+    expect(stdout(['[%c]', ''])).toBe('[\x00]')
+  })
+
+  it('\\u / \\U unicode escapes', () => {
+    expect(stdout(['\\u00e9\n'])).toBe('é\n')
+    expect(stdout(['\\U0001F600'])).toBe('😀')
+  })
+
+  it('%q shell-quoting', () => {
+    expect(stdout(['%q\n', 'a b'])).toBe('a\\ b\n')
+    expect(stdout(['%q\n', ''])).toBe("''\n")
+    expect(stdout(['%q\n', "it's"])).toBe("it\\'s\n")
+    expect(stdout(['%q\n', 'ümlaut'])).toBe("$'\\303\\274mlaut'\n")
+    expect(stdout(['%q\n', 'tab\ttab'])).toBe("$'tab\\ttab'\n")
+  })
+
+  it('%a at IEEE double precision (differs from bash long double)', () => {
+    expect(stdout(['%a\n', '1.0'])).toBe('0x1p+0\n')
+    expect(stdout(['%a\n', '0.5'])).toBe('0x1p-1\n')
+    expect(stdout(['%a\n', '3.14'])).toBe('0x1.91eb851eb851fp+1\n')
+    expect(stdout(['%A\n', '255.5'])).toBe('0X1.FFP+7\n')
   })
 })
 
@@ -311,26 +406,28 @@ describe('handleTest', () => {
     Promise.resolve<[unknown, IOResult]>([new FileStat({ name: 'x' }), new IOResult()]),
   )
   const session = new Session({ sessionId: 'test' })
+  const testResolve: ResolveFn = () => Promise.reject(new Error('unused'))
+  const testNamespace = () => new Namespace(new MountRegistry({}, MountMode.READ), testResolve)
 
   it('-z on empty string → true (exit 0)', async () => {
-    const [, io] = await handleTest(dispatch, ['-z', ''], session)
+    const [, io] = await handleTest(dispatch, testNamespace(), ['-z', ''], session)
     expect(io.exitCode).toBe(0)
   })
 
   it('-z on non-empty → false (exit 1)', async () => {
-    const [, io] = await handleTest(dispatch, ['-z', 'x'], session)
+    const [, io] = await handleTest(dispatch, testNamespace(), ['-z', 'x'], session)
     expect(io.exitCode).toBe(1)
   })
 
   it('integer comparison -eq', async () => {
-    const [, io] = await handleTest(dispatch, ['3', '-eq', '3'], session)
+    const [, io] = await handleTest(dispatch, testNamespace(), ['3', '-eq', '3'], session)
     expect(io.exitCode).toBe(0)
-    const [, io2] = await handleTest(dispatch, ['3', '-eq', '4'], session)
+    const [, io2] = await handleTest(dispatch, testNamespace(), ['3', '-eq', '4'], session)
     expect(io2.exitCode).toBe(1)
   })
 
   it('string equality =', async () => {
-    const [, io] = await handleTest(dispatch, ['foo', '=', 'foo'], session)
+    const [, io] = await handleTest(dispatch, testNamespace(), ['foo', '=', 'foo'], session)
     expect(io.exitCode).toBe(0)
   })
 
@@ -347,9 +444,9 @@ describe('handleTest', () => {
     })
     const s = new Session({ sessionId: 'test' })
     s.cwd = '/data'
-    const [, io] = await handleTest(spy, ['-f', 'plain.txt'], s)
+    const [, io] = await handleTest(spy, testNamespace(), ['-f', 'plain.txt'], s)
     expect(io.exitCode).toBe(0)
-    const [, io2] = await handleTest(spy, ['-f', 'missing.txt'], s)
+    const [, io2] = await handleTest(spy, testNamespace(), ['-f', 'missing.txt'], s)
     expect(io2.exitCode).toBe(1)
   })
 
@@ -358,7 +455,7 @@ describe('handleTest', () => {
       Promise.resolve<[unknown, IOResult]>([new FileStat({ name: 'x' }), new IOResult()]),
     )
     const s = new Session({ sessionId: 'test' })
-    const [, io] = await handleTest(spy, ['-f', ''], s)
+    const [, io] = await handleTest(spy, testNamespace(), ['-f', ''], s)
     expect(io.exitCode).toBe(1)
     expect(spy).not.toHaveBeenCalled()
   })
@@ -367,13 +464,13 @@ describe('handleTest', () => {
     const spy = vi.fn<DispatchFn>((op, scope) => {
       const ps = scope
       if (op === 'readdir' && ps.virtual === '/data/sub') {
-        return Promise.resolve<[unknown, IOResult]>([[], new IOResult()])
+        return Promise.resolve<[unknown, IOResult]>([['a.txt'], new IOResult()])
       }
       return Promise.reject(new Error(`not found: ${ps.virtual}`))
     })
     const s = new Session({ sessionId: 'test' })
     s.cwd = '/data'
-    const [, io] = await handleTest(spy, ['-d', 'sub'], s)
+    const [, io] = await handleTest(spy, testNamespace(), ['-d', 'sub'], s)
     expect(io.exitCode).toBe(0)
   })
 })
@@ -416,12 +513,42 @@ describe('handleTrap / handleReturn / handleLocal', () => {
   })
 
   it('handleReturn throws ReturnSignal with exit code', () => {
-    expect(() => handleReturn(['42'])).toThrow(ReturnSignal)
+    const s = new Session({ sessionId: 'test' })
+    const cs = new CallStack()
+    cs.push([], 'f')
+    expect(() => handleReturn(['42'], s, cs)).toThrow(ReturnSignal)
     try {
-      handleReturn(['42'])
+      handleReturn(['42'], s, cs)
     } catch (err) {
       if (err instanceof ReturnSignal) expect(err.exitCode).toBe(42)
     }
+  })
+
+  it('bare return propagates the last exit code', () => {
+    const s = new Session({ sessionId: 'test' })
+    s.lastExitCode = 1
+    const cs = new CallStack()
+    cs.push([], 'f')
+    try {
+      handleReturn([], s, cs)
+      expect.unreachable()
+    } catch (err) {
+      if (!(err instanceof ReturnSignal)) throw err
+      expect(err.exitCode).toBe(1)
+    }
+  })
+
+  it('return outside a function fails without a signal', async () => {
+    const s = new Session({ sessionId: 'test' })
+    const [, io] = handleReturn([], s, new CallStack())
+    expect(io.exitCode).toBe(2)
+    expect(decode(await materialize(io.stderr))).toContain("can only `return'")
+  })
+
+  it('return in a sourced script raises the signal', () => {
+    const s = new Session({ sessionId: 'test' })
+    s.sourceDepth = 1
+    expect(() => handleReturn([], s, null)).toThrow(ReturnSignal)
   })
 
   it('handleLocal assigns to session.env', () => {
@@ -665,8 +792,11 @@ describe('handleShift / handleReturn argument checks', () => {
   })
 
   it('return with a non-numeric arg raises 2 with a message', () => {
+    const s = new Session({ sessionId: 'test' })
+    const cs = new CallStack()
+    cs.push([], 'f')
     try {
-      handleReturn(['x'])
+      handleReturn(['x'], s, cs)
       expect.unreachable()
     } catch (err) {
       if (!(err instanceof ReturnSignal)) throw err

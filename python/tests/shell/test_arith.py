@@ -95,3 +95,19 @@ def test_errors():
 
 def test_empty_expression_is_zero():
     assert evaluate_arith("", {}) == (0, {})
+
+
+def test_base_literals():
+    assert evaluate_arith("16#ff", {})[0] == 255
+    assert evaluate_arith("2#101", {})[0] == 5
+    assert evaluate_arith("8#17", {})[0] == 15
+    assert evaluate_arith("36#z", {})[0] == 35
+    assert evaluate_arith("64#_", {})[0] == 63
+    assert evaluate_arith("16#a + 2#10", {})[0] == 12
+
+
+def test_base_literal_errors():
+    with pytest.raises(ArithError):
+        evaluate_arith("2#9", {})
+    with pytest.raises(ArithError):
+        evaluate_arith("65#1", {})

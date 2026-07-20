@@ -62,4 +62,60 @@ describe('IFS / read interaction and inline VAR=val cmd prefix', () => {
       await ws.close()
     }
   })
+
+  it('read trims trailing default-IFS whitespace', async () => {
+    const { ws } = await makeIntegrationWS()
+    try {
+      expect(await run(ws, 'read a b <<< "  x  y  "; echo "[$b]"')).toBe('[y]\n')
+    } finally {
+      await ws.close()
+    }
+  })
+
+  it('read single var keeps inner whitespace', async () => {
+    const { ws } = await makeIntegrationWS()
+    try {
+      expect(await run(ws, 'read a <<< "  x  y  "; echo "[$a]"')).toBe('[x  y]\n')
+    } finally {
+      await ws.close()
+    }
+  })
+
+  it('read keeps trailing non-whitespace IFS chars', async () => {
+    const { ws } = await makeIntegrationWS()
+    try {
+      expect(await run(ws, 'IFS=: read a b <<< "x:y:z:"; echo "[$b]"')).toBe('[y:z:]\n')
+    } finally {
+      await ws.close()
+    }
+  })
+
+  it('read single var with non-whitespace IFS stays intact', async () => {
+    const { ws } = await makeIntegrationWS()
+    try {
+      expect(await run(ws, 'IFS=: read a <<< ":x:"; echo "[$a]"')).toBe('[:x:]\n')
+    } finally {
+      await ws.close()
+    }
+  })
+
+  it('read rebinds stdin on the next line', async () => {
+    const { ws } = await makeIntegrationWS()
+    try {
+      await run(ws, 'read za <<< "first"')
+      expect(await run(ws, 'read zb <<< "second"; echo "$zb"')).toBe('second\n')
+    } finally {
+      await ws.close()
+    }
+  })
+
+  it('read from a pipe works after a previous line', async () => {
+    const { ws } = await makeIntegrationWS()
+    try {
+      await run(ws, "printf 'a\\n' | { read z1; echo $z1; }")
+      expect(await run(ws, "printf 'b\\n' | { read z2; echo $z2; }")).toBe('b\n')
+    } finally {
+      await ws.close()
+    }
+  })
 })

@@ -19,10 +19,13 @@
     "lancedb": "tsx lancedb.ts",
     "qdrant": "tsx qdrant.ts",
     "ssh": "tsx ssh.ts",
-    "runtime": "tsx runtime.ts"
+    "runtime": "tsx runtime.ts",
+    "slack:server": "tsx server/slack.ts",
+    "slack:setup": "prisma generate --schema prisma/schema.prisma && prisma db push --schema prisma/schema.prisma --skip-generate"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.0.0",
+    "@prisma/client": "^6.19.3",
     "@lancedb/lancedb": "^0.30.0",
     "@qdrant/js-client-rest": "^1.18.0",
     "@modelcontextprotocol/sdk": "^1.0.0",
@@ -39,6 +42,7 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/ssh2": "^1.15.0",
+    "prisma": "^6.19.3",
     "tsx": "^4.20.0",
     "typescript": "^6.0.3"
   },

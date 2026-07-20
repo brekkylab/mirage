@@ -52,6 +52,13 @@ export class Session {
   shellOptions: Record<string, boolean>
   readonlyVars: Set<string>
   arrays: Record<string, string[]>
+  // Transient `set -e` marker: true when the failure just returned
+  // came from a short-circuited &&/|| branch or a `!`-negated command,
+  // which bash exempts from errexit. Reset on every node execution.
+  errexitImmune: boolean
+  // Depth of nested `source`/`.` execution: `return` is legal and the
+  // program loop absorbs its signal only while a file is being sourced.
+  sourceDepth = 0
   stdinBuffer: AsyncLineIterator | null = null
   stdinSource: unknown = null
   localVars: Map<string, string | null> | null = null
@@ -62,6 +69,7 @@ export class Session {
 
   constructor(init: SessionInit) {
     this.sessionId = init.sessionId
+    this.errexitImmune = false
     this.cwd = init.cwd ?? '/'
     this.env = init.env ?? {}
     this.createdAt = init.createdAt ?? Date.now() / 1000

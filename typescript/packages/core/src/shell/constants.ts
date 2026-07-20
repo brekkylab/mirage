@@ -12,11 +12,12 @@
 // limitations under the License.
 // ========= Copyright 2026 @ Strukto.AI All Rights Reserved. =========
 
-// Bash arithmetic tokens: integer literals (decimal/hex/octal), variable
-// names, then operators longest-first so `<<=` never lexes as `<<` + `=`.
+// Bash arithmetic tokens: integer literals (base#value/decimal/hex/
+// octal), variable names, then operators longest-first so `<<=` never
+// lexes as `<<` + `=`.
 export const ARITH_TOKEN = new RegExp(
   [
-    '(0[xX][0-9a-fA-F]+|\\d+)',
+    '(\\d+#[0-9a-zA-Z@_]+|0[xX][0-9a-fA-F]+|\\d+)',
     '([A-Za-z_]\\w*)',
     '(<<=|>>=|\\*\\*|\\+\\+|--|<<|>>|<=|>=|==|!=|&&|\\|\\||\\+=|-=|\\*=|/=|%=|&=|\\^=|\\|=|[-+*/%<>=!~&|^?:(),])',
     '(\\s+)',

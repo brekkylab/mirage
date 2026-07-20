@@ -14,9 +14,13 @@
 
 
 def test_readonly_blocks_reassignment(shell):
-    out = shell.mirage("readonly X=1; X=2; echo $X")
-    assert "1" in out
-    assert "2" not in out
+    # A bare assignment to a readonly variable is fatal in
+    # non-interactive bash: the rest of the line is abandoned.
+    code, out, err = shell.mirage_result("readonly X=1; X=2; echo $X")
+    assert code == 1
+    assert out == ""
+    assert "readonly variable" in err
+    assert shell.mirage("echo $X") == "1\n"
 
 
 def test_readonly_blocks_unset(shell):
@@ -25,8 +29,10 @@ def test_readonly_blocks_unset(shell):
 
 
 def test_declare_r_blocks_reassignment(shell):
-    out = shell.mirage("declare -r Y=5; Y=10; echo $Y")
-    assert out == "5\n"
+    code, out, _ = shell.mirage_result("declare -r Y=5; Y=10; echo $Y")
+    assert code == 1
+    assert out == ""
+    assert shell.mirage("echo $Y") == "5\n"
 
 
 def test_readonly_emits_error(shell):

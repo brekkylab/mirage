@@ -14,11 +14,12 @@
 
 import re
 
-# Bash arithmetic tokens: integer literals (decimal/hex/octal), variable
-# names, then operators longest-first so `<<=` never lexes as `<<` + `=`.
+# Bash arithmetic tokens: integer literals (base#value/decimal/hex/
+# octal), variable names, then operators longest-first so `<<=` never
+# lexes as `<<` + `=`.
 ARITH_TOKEN = re.compile(
     r"""
-    (?P<num>0[xX][0-9a-fA-F]+|\d+)
+    (?P<num>\d+\#[0-9a-zA-Z@_]+|0[xX][0-9a-fA-F]+|\d+)
   | (?P<name>[A-Za-z_]\w*)
   | (?P<op><<=|>>=|\*\*|\+\+|--|<<|>>|<=|>=|==|!=|&&|\|\|
        |\+=|-=|\*=|/=|%=|&=|\^=|\|=

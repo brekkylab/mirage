@@ -24,6 +24,7 @@ export interface Mount {
   path: string
   resource: string
   backend: string
+  mode?: string
   fixture?: string
   // Fixture seeded by the adapter (over the backend API) instead of the
   // harness tee path -- used by read-only backends like box.

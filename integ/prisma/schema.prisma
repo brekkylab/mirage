@@ -1,0 +1,58 @@
+// Fake-Slack workspace schema for the integ battery. One shared Node server
+// (integ/server/slack.ts) serves the Slack Web API from this SQLite store,
+// seeded from integ/fixtures/slack/v1.json; the Python and TypeScript battery
+// hosts both call it over HTTP. Flat scalar FKs (no @relation) — the fake
+// queries each table explicitly.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("SLACK_DB_URL")
+}
+
+model Channel {
+  id         String  @id
+  name       String
+  kind       String
+  created    Int
+  isArchived Boolean @default(false)
+  isPrivate  Boolean @default(false)
+  dmUserId   String?
+}
+
+model User {
+  id       String  @id
+  name     String
+  realName String
+  email    String
+  isBot    Boolean @default(false)
+  deleted  Boolean @default(false)
+}
+
+model Message {
+  pk           Int     @id @default(autoincrement())
+  channelId    String
+  ts           String
+  userId       String
+  text         String
+  type         String  @default("message")
+  threadTs     String?
+  reactionsJson String?
+}
+
+model SlackFile {
+  id          String  @id
+  channelId   String
+  messageTs   String
+  name        String
+  title       String
+  mimetype    String
+  filetype    String
+  size        Int
+  timestamp   Int
+  content     String
+  contentPath String?
+}

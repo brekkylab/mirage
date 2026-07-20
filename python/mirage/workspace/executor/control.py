@@ -66,7 +66,7 @@ async def _execute_body(
                                      if s is not None]) if any(
                                          s is not None
                                          for s in all_stdout) else None
-            raise BreakSignal(stdout=combined, io=merged_io)
+            raise BreakSignal(stdout=combined, io=merged_io, levels=sig.levels)
         except ContinueSignal as sig:
             if sig.stdout is not None:
                 all_stdout.append(sig.stdout)
@@ -75,11 +75,14 @@ async def _execute_body(
                                      if s is not None]) if any(
                                          s is not None
                                          for s in all_stdout) else None
-            raise ContinueSignal(stdout=combined, io=merged_io)
+            raise ContinueSignal(stdout=combined,
+                                 io=merged_io,
+                                 levels=sig.levels)
         all_stdout.append(stdout)
         merged_io = await merged_io.merge(io)
         if (io.exit_code != 0 and session.shell_options.get("errexit")
-                and cmd.type not in ERREXIT_EXEMPT_TYPES):
+                and cmd.type not in ERREXIT_EXEMPT_TYPES
+                and not session.errexit_immune):
             merged_io.exit_code = io.exit_code
             break
     non_empty = [s for s in all_stdout if s is not None]
@@ -89,16 +92,18 @@ async def _execute_body(
 
 class BreakSignal(Exception):
 
-    def __init__(self, stdout=None, io=None):
+    def __init__(self, stdout=None, io=None, levels: int = 1):
         self.stdout = stdout
         self.io = io if io is not None else IOResult()
+        self.levels = levels
 
 
 class ContinueSignal(Exception):
 
-    def __init__(self, stdout=None, io=None):
+    def __init__(self, stdout=None, io=None, levels: int = 1):
         self.stdout = stdout
         self.io = io if io is not None else IOResult()
+        self.levels = levels
 
 
 class ReturnSignal(Exception):
@@ -106,6 +111,11 @@ class ReturnSignal(Exception):
     def __init__(self, exit_code: int = 0, stderr: bytes = b"") -> None:
         self.exit_code = exit_code
         self.stderr = stderr
+
+
+def _chain_streams(all_stdout: list[ByteSource | None]) -> ByteSource | None:
+    non_empty = [s for s in all_stdout if s is not None]
+    return async_chain(*non_empty) if non_empty else None
 
 
 def _collect_loop_result(
@@ -173,11 +183,19 @@ async def handle_for(
                 if sig.stdout is not None:
                     all_stdout.append(sig.stdout)
                 merged_io = await merged_io.merge(sig.io)
+                if sig.levels > 1:
+                    raise BreakSignal(stdout=_chain_streams(all_stdout),
+                                      io=merged_io,
+                                      levels=sig.levels - 1)
                 break
             except ContinueSignal as sig:
                 if sig.stdout is not None:
                     all_stdout.append(sig.stdout)
                 merged_io = await merged_io.merge(sig.io)
+                if sig.levels > 1:
+                    raise ContinueSignal(stdout=_chain_streams(all_stdout),
+                                         io=merged_io,
+                                         levels=sig.levels - 1)
                 continue
             merged_io = await merged_io.merge(io)
             all_stdout.append(stdout)
@@ -227,11 +245,19 @@ async def _condition_loop(
                 if sig.stdout is not None:
                     all_stdout.append(sig.stdout)
                 merged_io = await merged_io.merge(sig.io)
+                if sig.levels > 1:
+                    raise BreakSignal(stdout=_chain_streams(all_stdout),
+                                      io=merged_io,
+                                      levels=sig.levels - 1)
                 break
             except ContinueSignal as sig:
                 if sig.stdout is not None:
                     all_stdout.append(sig.stdout)
                 merged_io = await merged_io.merge(sig.io)
+                if sig.levels > 1:
+                    raise ContinueSignal(stdout=_chain_streams(all_stdout),
+                                         io=merged_io,
+                                         levels=sig.levels - 1)
                 continue
             merged_io = await merged_io.merge(io)
             all_stdout.append(stdout)
@@ -320,33 +346,77 @@ async def handle_select(
     stdin: ByteSource | None = None,
     call_stack: CallStack | None = None,
 ) -> tuple[ByteSource | None, IOResult, ExecutionNode]:
+    """Run bash's select loop: menu to stderr, choice read from stdin.
+
+    Each iteration prompts with PS3's default ``#? ``, reads one line,
+    stores it raw in REPLY, and sets the variable to the chosen value
+    (empty for an out-of-range or non-numeric reply, like bash). An
+    empty reply redisplays the menu without running the body; EOF ends
+    the loop.
+
+    Args:
+        execute_node (Callable): recursive node executor.
+        variable (str): the select variable name.
+        values (list[str | PathSpec]): menu entries, already expanded.
+        body (list[tree_sitter.Node]): loop body statements.
+        session (Session): shell session state.
+        stdin (ByteSource | None): line source for choices.
+        call_stack (CallStack | None): function-call scope, if any.
+    """
     merged_io = IOResult()
     all_stdout: list[ByteSource | None] = []
     saved = session.env.get(variable)
 
-    # Save and materialize stdin for re-reading across iterations
     prev_buffer = session._stdin_buffer
     if stdin is not None:
         session._stdin_buffer = _line_buffer(stdin)
         stdin = None
 
+    menu = "".join(f"{i + 1}) {word_text(v)}\n"
+                   for i, v in enumerate(values)).encode()
+    merged_io = await merged_io.merge(IOResult(stderr=menu))
     try:
-        for val in values:
-            # env stores strings only; bash keeps `for f in sub/*.txt`
-            # matches relative, so the loop variable takes the typed form
-            session.env[variable] = word_text(val)
+        for _ in range(_MAX_WHILE):
+            merged_io = await merged_io.merge(IOResult(stderr=b"#? "))
+            line_bytes = None
+            if session._stdin_buffer is not None:
+                line_bytes = await session._stdin_buffer.readline()
+            if line_bytes is None:
+                # bash terminates the prompt line with a newline when
+                # the choice read hits EOF.
+                all_stdout.append(b"\n")
+                break
+            reply = line_bytes.decode(errors="replace").rstrip("\n")
+            if not reply:
+                merged_io = await merged_io.merge(IOResult(stderr=menu))
+                continue
+            session.env["REPLY"] = reply
+            choice = ""
+            if reply.strip().isdigit():
+                idx = int(reply.strip())
+                if 1 <= idx <= len(values):
+                    choice = word_text(values[idx - 1])
+            session.env[variable] = choice
             try:
                 stdout, io, _ = await _execute_body(execute_node, body,
-                                                    session, stdin, call_stack)
+                                                    session, None, call_stack)
             except BreakSignal as sig:
                 if sig.stdout is not None:
                     all_stdout.append(sig.stdout)
                 merged_io = await merged_io.merge(sig.io)
+                if sig.levels > 1:
+                    raise BreakSignal(stdout=_chain_streams(all_stdout),
+                                      io=merged_io,
+                                      levels=sig.levels - 1)
                 break
             except ContinueSignal as sig:
                 if sig.stdout is not None:
                     all_stdout.append(sig.stdout)
                 merged_io = await merged_io.merge(sig.io)
+                if sig.levels > 1:
+                    raise ContinueSignal(stdout=_chain_streams(all_stdout),
+                                         io=merged_io,
+                                         levels=sig.levels - 1)
                 continue
             merged_io = await merged_io.merge(io)
             all_stdout.append(stdout)

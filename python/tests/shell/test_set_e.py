@@ -57,3 +57,29 @@ def test_set_o_errexit_alias(shell):
 def test_set_e_pipeline_failure(shell):
     out = shell.mirage("set -e; false | true; echo after")
     assert out == "after\n"
+
+
+def test_set_e_exits_on_and_list_tail_failure(shell):
+    # bash exits when the command after the final && fails.
+    out = shell.mirage("set -e; true && false; echo unreached")
+    assert "unreached" not in out
+
+
+def test_set_e_exits_on_or_list_tail_failure(shell):
+    out = shell.mirage("set -e; false || false; echo unreached")
+    assert "unreached" not in out
+
+
+def test_set_e_negated_command_immune(shell):
+    out = shell.mirage("set -e; ! true; echo ok")
+    assert out == "ok\n"
+
+
+def test_set_e_negated_pipeline_immune(shell):
+    out = shell.mirage("set -e; ! true | true; echo ok")
+    assert out == "ok\n"
+
+
+def test_set_e_list_tail_in_and_of_negated(shell):
+    out = shell.mirage("set -e; true && ! true; echo ok")
+    assert out == "ok\n"

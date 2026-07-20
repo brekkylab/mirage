@@ -100,4 +100,50 @@ describe('set -e (errexit)', () => {
       await ws.close()
     }
   })
+  it('exits on && list-tail failure', async () => {
+    const { ws } = await makeIntegrationWS()
+    try {
+      const out = await run(ws, 'set -e; true && false; echo unreached')
+      expect(out).not.toContain('unreached')
+    } finally {
+      await ws.close()
+    }
+  })
+
+  it('exits on || list-tail failure', async () => {
+    const { ws } = await makeIntegrationWS()
+    try {
+      const out = await run(ws, 'set -e; false || false; echo unreached')
+      expect(out).not.toContain('unreached')
+    } finally {
+      await ws.close()
+    }
+  })
+
+  it('negated command is immune', async () => {
+    const { ws } = await makeIntegrationWS()
+    try {
+      expect(await run(ws, 'set -e; ! true; echo ok')).toBe('ok\n')
+    } finally {
+      await ws.close()
+    }
+  })
+
+  it('negated pipeline is immune', async () => {
+    const { ws } = await makeIntegrationWS()
+    try {
+      expect(await run(ws, 'set -e; ! true | true; echo ok')).toBe('ok\n')
+    } finally {
+      await ws.close()
+    }
+  })
+
+  it('negated tail of an && list is immune', async () => {
+    const { ws } = await makeIntegrationWS()
+    try {
+      expect(await run(ws, 'set -e; true && ! true; echo ok')).toBe('ok\n')
+    } finally {
+      await ws.close()
+    }
+  })
 })

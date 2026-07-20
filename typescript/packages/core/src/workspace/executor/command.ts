@@ -36,6 +36,10 @@ import type { RoutingDecision } from './route/index.ts'
 import type { Session } from '../session/session.ts'
 import { ExecutionNode } from '../types.ts'
 import { asyncChain } from '../../io/stream.ts'
+import { strategyFor } from '../../commands/builtin/generic/crossmount/detect.ts'
+import type { Cmd } from '../../commands/builtin/generic/crossmount/types.ts'
+import { Strategy } from '../../commands/builtin/generic/crossmount/types.ts'
+import { resolveGlobs } from '../expand/globs.ts'
 import type { DispatchFn } from './cross_mount.ts'
 import { handleCrossMount, isCrossMount } from './cross_mount.ts'
 import type { RunSingle } from '../../commands/builtin/generic/crossmount/index.ts'
@@ -49,7 +53,7 @@ import {
 import { CommandTimeoutError, maybeWithTimeout } from '../../commands/builtin/utils/safeguard.ts'
 import { resolveAcrossMounts, resolveSafeguard } from '../../commands/safeguard.ts'
 import type { ExecuteNodeFn } from './jobs.ts'
-import { handleJobs, handleKill, handlePs, handleWait } from './jobs.ts'
+import { handleFg, handleJobs, handleKill, handlePs, handleWait } from './jobs.ts'
 import { UsageError } from '../../commands/errors.ts'
 import { formatFsError } from '../../utils/errors.ts'
 import { rstripSlash, stripSlash } from '../../utils/slash.ts'
@@ -302,7 +306,8 @@ export async function handleCommand(
 
   if (JOB_BUILTINS.has(cmdName) && jobTable !== null) {
     const textParts = parts.map((p) => (typeof p === 'string' ? p : p.virtual))
-    if (cmdName === 'wait' || cmdName === 'fg') return handleWait(jobTable, textParts)
+    if (cmdName === 'wait') return handleWait(jobTable, textParts)
+    if (cmdName === 'fg') return handleFg(jobTable, textParts)
     if (cmdName === 'kill') return handleKill(jobTable, textParts)
     if (cmdName === 'jobs') return handleJobs(jobTable, textParts)
     if (cmdName === 'ps') return handlePs(jobTable, textParts)
@@ -395,6 +400,15 @@ export async function handleCommand(
         new ExecutionNode({ command: cmdStr, exitCode: code, stderr: msg }),
       ]
     }
+    let csScopes = pathScopes
+    if (strategyFor(cmdName as Cmd, csFlags) === Strategy.RELAY) {
+      // STREAM and FANOUT run each operand natively on its mount, which
+      // expands the operand's glob. RELAY bypasses the mount command
+      // wrappers entirely, so its glob operands must expand here; an
+      // unmatched glob stays the literal word, like bash.
+      const expanded = await resolveGlobs(pathScopes, registry)
+      csScopes = expanded.filter((p): p is PathSpec => typeof p !== 'string')
+    }
     const runCtx: RunOnMountCtx = {
       registry,
       session,
@@ -408,7 +422,7 @@ export async function handleCommand(
       runOnMount(runCtx, name, ps, ts, fk, opts ?? {})
     const [csStdout, csIo, csExec] = await handleCrossMount(
       cmdName,
-      pathScopes,
+      csScopes,
       csTexts,
       csFlags,
       dispatch,
@@ -861,10 +875,14 @@ async function executeShellFunction(
         if (stdout !== null) allStdout.push(stdout)
         mergedIo = await mergedIo.merge(io)
         lastExec = execNode
+        // $? tracks each statement inside the body, so a bare `return`
+        // (and mid-function $?) sees the last command.
+        session.lastExitCode = io.exitCode
         if (
           io.exitCode !== 0 &&
           session.shellOptions.errexit === true &&
-          !ERREXIT_EXEMPT_TYPES.has(cmdNode.type)
+          !ERREXIT_EXEMPT_TYPES.has(cmdNode.type) &&
+          !session.errexitImmune
         ) {
           mergedIo.exitCode = io.exitCode
           break

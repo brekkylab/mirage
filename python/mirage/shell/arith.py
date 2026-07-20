@@ -51,7 +51,38 @@ def _trunc_mod(a: int, b: int) -> int:
     return a - _trunc_div(a, b) * b
 
 
+def _base_digit(ch: str, base: int) -> int:
+    if ch.isdigit():
+        return ord(ch) - ord("0")
+    if "a" <= ch <= "z":
+        return ord(ch) - ord("a") + 10
+    if "A" <= ch <= "Z":
+        # Below base 37 upper- and lowercase are interchangeable; above,
+        # uppercase continues the digit range (bash base#value rules).
+        return ord(ch) - ord("A") + (10 if base <= 36 else 36)
+    if ch == "@":
+        return 62
+    return 63
+
+
+def _parse_base_literal(text: str) -> int:
+    base_text, _, digits = text.partition("#")
+    base = int(base_text)
+    if base < 2 or base > 64:
+        raise ArithError(f'invalid arithmetic base (error token is "{text}")')
+    value = 0
+    for ch in digits:
+        digit = _base_digit(ch, base)
+        if digit >= base:
+            raise ArithError(f"value too great for base (error token is "
+                             f'"{text}")')
+        value = value * base + digit
+    return value
+
+
 def _parse_literal(text: str) -> int:
+    if "#" in text:
+        return _parse_base_literal(text)
     if text.lower().startswith("0x"):
         return int(text, 16)
     if text.startswith("0") and text != "0":

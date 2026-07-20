@@ -27,6 +27,7 @@ from mirage.shell.node_kind import NodeKind, node_kind
 from mirage.shell.types import ERREXIT_EXEMPT_TYPES
 from mirage.shell.types import NodeType as NT
 from mirage.shell.types import Redirect, RedirectKind
+from mirage.shell.xtrace import trace_assignment
 from mirage.types import word_text
 from mirage.workspace.abort import MirageAbortError
 from mirage.workspace.executor.control import (handle_case, handle_for,
@@ -44,15 +45,16 @@ from mirage.workspace.mount import MountRegistry
 from mirage.workspace.mount.namespace import Namespace
 from mirage.workspace.node.command_dispatch import execute_command
 from mirage.workspace.node.program import execute_program
-from mirage.workspace.node.test_expr import expand_test_expr
+from mirage.workspace.node.test_expr import (expand_double_bracket,
+                                             expand_test_expr)
 from mirage.workspace.session import Session
 from mirage.workspace.types import ExecutionNode
 
 from mirage.shell.helpers import (  # isort: skip
     get_case_items, get_case_word, get_declaration_keyword, get_for_parts,
     get_function_body, get_function_name, get_if_branches, get_list_parts,
-    get_negated_command, get_pipeline_commands, get_redirects,
-    get_subshell_body, get_text, get_unset_names, get_while_parts)
+    get_negated_command, get_pipeline_commands, get_redirects, get_text,
+    get_unset_names, get_while_parts)
 from mirage.workspace.executor.builtins import (  # isort: skip
     handle_export, handle_local, handle_readonly, handle_test, handle_unset)
 
@@ -80,7 +82,10 @@ async def _expand_array_items(
     values = list(array_node.named_children)
     classified = await expand_and_classify(values, session, execute_fn,
                                            registry, session.cwd, cs)
-    resolved = await resolve_globs(classified, registry)
+    resolved = await resolve_globs(classified,
+                                   registry,
+                                   noglob=bool(
+                                       session.shell_options.get("noglob")))
     return [word_text(w) for w in resolved]
 
 
@@ -192,6 +197,7 @@ async def execute_node(
     if cancel is not None and cancel.is_set():
         raise MirageAbortError()
     cs = call_stack if call_stack is not None else CallStack()
+    session.errexit_immune = False
 
     recurse = partial(execute_node,
                       dispatch,
@@ -231,17 +237,33 @@ async def execute_node(
     # ── pipeline ────────────────────────────────
     if kind == NodeKind.PIPELINE:
         commands, stderr_flags = get_pipeline_commands(node)
+        # `! a | b` parses as pipeline(negated_command(a), b) but bash
+        # negates the WHOLE pipeline's exit status.
+        negated = bool(commands) and commands[0].type == NT.NEGATED_COMMAND
+        if negated:
+            commands = [get_negated_command(commands[0])] + commands[1:]
+        pipe_recurse = recurse
         if any(stderr_flags):
             targets = [
                 command for i, command in enumerate(commands)
                 if i < len(stderr_flags) and stderr_flags[i]
             ]
-            wrapped = partial(_recurse_pipe_stderr, recurse, dispatch,
-                              execute_fn, registry, targets)
-            return await handle_pipe(wrapped, commands, stderr_flags, session,
-                                     stdin, cs)
-        return await handle_pipe(recurse, commands, stderr_flags, session,
-                                 stdin, cs)
+            pipe_recurse = partial(_recurse_pipe_stderr, recurse, dispatch,
+                                   execute_fn, registry, targets)
+        stdout, io, exec_node = await handle_pipe(pipe_recurse, commands,
+                                                  stderr_flags, session, stdin,
+                                                  cs)
+        if negated:
+            io = IOResult(
+                exit_code=0 if io.exit_code != 0 else 1,
+                stderr=io.stderr,
+                reads=io.reads,
+                writes=io.writes,
+                cache=io.cache,
+            )
+            exec_node.exit_code = io.exit_code
+            session.errexit_immune = True
+        return stdout, io, exec_node
 
     # ── list (&&, ||) ───────────────────────────
     if kind == NodeKind.LIST:
@@ -287,8 +309,22 @@ async def execute_node(
 
     # ── subshell ────────────────────────────────
     if kind == NodeKind.SUBSHELL:
-        body = get_subshell_body(node)
-        return await handle_subshell(recurse, body, session, stdin, cs)
+        # A subshell is its own shell: background jobs started inside
+        # live in a private job table (`$!`/`wait`/`kill` in the body
+        # see them; the parent's table never does), mirroring bash's
+        # forked process.
+        sub_table = JobTable()
+        sub_recurse = partial(execute_node,
+                              dispatch,
+                              registry,
+                              namespace,
+                              sub_table,
+                              execute_fn,
+                              agent_id,
+                              cancel=cancel,
+                              routing_decision=routing_decision)
+        return await handle_subshell(sub_recurse, list(node.children), session,
+                                     stdin, cs, sub_table, agent_id)
 
     # ── arithmetic command ((( ... ))) ──────────
     if (kind == NodeKind.COMPOUND and node.children
@@ -328,7 +364,8 @@ async def execute_node(
                 all_stdout.append(stdout)
             merged_io = await merged_io.merge(io)
             if (io.exit_code != 0 and session.shell_options.get("errexit")
-                    and child.type not in ERREXIT_EXEMPT_TYPES):
+                    and child.type not in ERREXIT_EXEMPT_TYPES
+                    and not session.errexit_immune):
                 merged_io.exit_code = io.exit_code
                 break
         if len(all_stdout) == 1:
@@ -349,7 +386,10 @@ async def execute_node(
                                                registry, session.cwd, cs)
         # The loop word list is consumed by the shell (WordPolicy.SHELL):
         # globs resolve to matches before iteration starts.
-        classified = await resolve_globs(classified, registry)
+        classified = await resolve_globs(
+            classified,
+            registry,
+            noglob=bool(session.shell_options.get("noglob")))
         if kind == NodeKind.SELECT:
             return await handle_select(recurse, var, classified, body, session,
                                        stdin, cs)
@@ -406,10 +446,13 @@ async def execute_node(
                     flag_chars.update(expanded[1:])
                 else:
                     assignments.append(expanded)
-        if keyword == NT.LOCAL:
-            return await handle_local(assignments, session)
         if keyword == "readonly" or "r" in flag_chars:
             return await handle_readonly(assignments, session)
+        # declare/typeset scope like `local` inside a function (bash
+        # semantics) and assign globally at top level, which is exactly
+        # handle_local's fallback when no function scope is active.
+        if keyword in (NT.LOCAL, "declare", "typeset"):
+            return await handle_local(assignments, session)
         return await handle_export(assignments, session)
 
     # ── unset ───────────────────────────────────
@@ -419,9 +462,20 @@ async def execute_node(
 
     # ── test ([ ] or [[ ]]) ─────────────────────
     if kind == NodeKind.TEST:
-        expanded = await expand_test_expr(node, session, execute_fn, cs,
-                                          registry)
-        return await handle_test(dispatch, expanded, session)
+        opener = node.children[0].type if node.children else "["
+        if opener == "[[":
+            tree = await expand_double_bracket(node, session, execute_fn, cs)
+            return await handle_test(dispatch,
+                                     namespace,
+                                     tree,
+                                     session,
+                                     name="[[")
+        test_argv = await expand_test_expr(node, session, execute_fn, cs)
+        return await handle_test(dispatch,
+                                 namespace,
+                                 test_argv,
+                                 session,
+                                 name="[")
 
     # ── negated command ─────────────────────────
     if kind == NodeKind.NEGATED:
@@ -435,6 +489,7 @@ async def execute_node(
             cache=io.cache,
         )
         exec_node.exit_code = io.exit_code
+        session.errexit_immune = True
         return stdout, io, exec_node
 
     # ── variable assignment at top level ────────
@@ -451,11 +506,12 @@ async def execute_node(
                if name_node is not None else text.partition("=")[0])
         append = any(c.type == "+=" for c in node.children)
         if key in session.readonly_vars:
+            # A bare assignment to a readonly variable is a fatal
+            # variable-assignment error in non-interactive bash: the
+            # rest of the line is abandoned (builtins like `export`
+            # merely fail with 1 and continue).
             err = f"bash: {key}: readonly variable\n".encode()
-            return None, IOResult(exit_code=1,
-                                  stderr=err), ExecutionNode(command=text,
-                                                             exit_code=1,
-                                                             stderr=err)
+            raise ExitSignal(1, stderr=err, contained_code=1)
         val_nodes = [
             c for c in node.named_children
             if c.type not in (NT.VARIABLE_NAME, "subscript")
@@ -514,7 +570,10 @@ async def execute_node(
         else:
             session.env[key] = val
             session.arrays.pop(key, None)
-        return None, IOResult(), ExecutionNode(command=text, exit_code=0)
+        io = IOResult()
+        if session.shell_options.get("xtrace"):
+            io.stderr = trace_assignment(key, val, append)
+        return None, io, ExecutionNode(command=text, exit_code=0)
 
     # Constructs the parser accepts but the executor cannot honor (e.g.
     # C-style `for ((;;))`). Mirrors the unsupported-builtin diagnostic

@@ -31,12 +31,11 @@ import {
   getNegatedCommand,
   getPipelineCommands,
   getRedirects,
-  getSubshellBody,
   getText,
   getUnsetNames,
   getWhileParts,
 } from '../../shell/helpers.ts'
-import type { JobTable } from '../../shell/job_table.ts'
+import { JobTable } from '../../shell/job_table.ts'
 import { ERREXIT_EXEMPT_TYPES, NodeType as NT, Redirect, RedirectKind } from '../../shell/types.ts'
 import { NodeKind, nodeKind } from '../../shell/node_kind.ts'
 import { expandRedirects } from '../expand/redirects.ts'
@@ -69,9 +68,10 @@ import type { MountRegistry } from '../mount/registry.ts'
 import type { Session } from '../session/session.ts'
 import { ExecutionNode } from '../types.ts'
 import { resolveGlobs } from '../expand/globs.ts'
-import { expandTestExpr } from './test_expr.ts'
+import { expandDoubleBracket, expandTestExpr } from './test_expr.ts'
 import { executeProgram } from './program.ts'
 import { executeCommand } from './command_dispatch.ts'
+import { traceAssignment } from '../../shell/xtrace.ts'
 
 type Result = [ByteSource | null, IOResult, ExecutionNode]
 type Recurse = (
@@ -99,7 +99,7 @@ async function expandArrayItems(
     session.cwd,
     callStack,
   )
-  const resolved = await resolveGlobs(classified, registry)
+  const resolved = await resolveGlobs(classified, registry, session.shellOptions.noglob === true)
   return resolved.map((w) => wordText(w))
 }
 
@@ -218,6 +218,7 @@ export async function executeNode(
   if (deps.signal?.aborted === true) {
     throw makeAbortError()
   }
+  session.errexitImmune = false
 
   if (kind === NodeKind.COMMENT) {
     return [null, new IOResult(), new ExecutionNode({ command: '', exitCode: 0 })]
@@ -248,13 +249,39 @@ export async function executeNode(
   }
 
   if (kind === NodeKind.PIPELINE) {
-    const [commands, stderrFlags] = getPipelineCommands(node)
+    const [pipeCommands, stderrFlags] = getPipelineCommands(node)
+    let commands = pipeCommands
+    // `! a | b` parses as pipeline(negated_command(a), b) but bash
+    // negates the WHOLE pipeline's exit status.
+    const first = commands[0]
+    const negated = first?.type === NT.NEGATED_COMMAND
+    if (negated) {
+      commands = [getNegatedCommand(first), ...commands.slice(1)]
+    }
+    let pipeRecurse = recurse
     if (stderrFlags.some(Boolean)) {
       const targets = commands.filter((_, i) => stderrFlags[i] === true)
-      const wrapped = recursePipeStderr.bind(null, recurse, dispatch, executeFn, registry, targets)
-      return handlePipe(wrapped, commands, stderrFlags, session, stdin, callStack)
+      pipeRecurse = recursePipeStderr.bind(null, recurse, dispatch, executeFn, registry, targets)
     }
-    return handlePipe(recurse, commands, stderrFlags, session, stdin, callStack)
+    const [stdout, io, execNode] = await handlePipe(
+      pipeRecurse,
+      commands,
+      stderrFlags,
+      session,
+      stdin,
+      callStack,
+    )
+    if (!negated) return [stdout, io, execNode]
+    const flipped = new IOResult({
+      exitCode: io.exitCode !== 0 ? 0 : 1,
+      stderr: io.stderr,
+      reads: io.reads,
+      writes: io.writes,
+      cache: io.cache,
+    })
+    execNode.exitCode = flipped.exitCode
+    session.errexitImmune = true
+    return [stdout, flipped, execNode]
   }
 
   if (kind === NodeKind.LIST) {
@@ -324,7 +351,18 @@ export async function executeNode(
   }
 
   if (kind === NodeKind.SUBSHELL) {
-    return handleSubshell(recurse, getSubshellBody(node), session, stdin, callStack)
+    // A subshell is its own shell: background jobs started inside live
+    // in a private job table (`$!`/`wait`/`kill` in the body see them;
+    // the parent's table never does), mirroring bash's forked process.
+    const subTable = new JobTable()
+    const subDeps: ExecuteNodeDeps = { ...deps, jobTable: subTable }
+    const subRecurse = (
+      n: TSNodeLike,
+      s: Session,
+      inp: ByteSource | null,
+      cs: CallStack | null,
+    ): Promise<Result> => executeNode(subDeps, n, s, inp, cs)
+    return handleSubshell(subRecurse, node.children, session, stdin, callStack, subTable, agentId)
   }
 
   if (kind === NodeKind.COMPOUND && node.children[0]?.type === NT.ARITH_OPEN) {
@@ -375,7 +413,9 @@ export async function executeNode(
       if (
         io.exitCode !== 0 &&
         session.shellOptions.errexit === true &&
-        !ERREXIT_EXEMPT_TYPES.has(child.type)
+        !ERREXIT_EXEMPT_TYPES.has(child.type) &&
+        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- recurse() mutates it
+        !session.errexitImmune
       ) {
         mergedIo.exitCode = io.exitCode
         break
@@ -405,7 +445,7 @@ export async function executeNode(
     )
     // The loop word list is consumed by the shell (WordPolicy.SHELL):
     // globs resolve to matches before iteration starts.
-    const resolved = await resolveGlobs(classified, registry)
+    const resolved = await resolveGlobs(classified, registry, session.shellOptions.noglob === true)
     if (kind === NodeKind.SELECT) {
       return handleSelect(recurse, variable, resolved, body, session, stdin, callStack)
     }
@@ -471,9 +511,14 @@ export async function executeNode(
         }
       }
     }
-    if (keyword === NT.LOCAL) return handleLocal(assignments, session)
     if (keyword === 'readonly' || flagChars.has('r')) {
       return handleReadonly(assignments, session)
+    }
+    // declare/typeset scope like `local` inside a function (bash
+    // semantics) and assign globally at top level, which is exactly
+    // handleLocal's fallback when no function scope is active.
+    if (keyword === NT.LOCAL || keyword === 'declare' || keyword === 'typeset') {
+      return handleLocal(assignments, session)
     }
     return handleExport(assignments, session)
   }
@@ -483,8 +528,13 @@ export async function executeNode(
   }
 
   if (kind === NodeKind.TEST) {
+    const opener = node.children[0]?.type ?? '['
+    if (opener === '[[') {
+      const tree = await expandDoubleBracket(node, session, executeFn, callStack)
+      return handleTest(dispatch, deps.namespace, tree, session, '[[')
+    }
     const expanded = await expandTestExpr(node, session, executeFn, callStack)
-    return handleTest(dispatch, expanded, session)
+    return handleTest(dispatch, deps.namespace, expanded, session, '[')
   }
 
   if (kind === NodeKind.NEGATED) {
@@ -498,6 +548,7 @@ export async function executeNode(
       cache: io.cache,
     })
     execNode.exitCode = flipped.exitCode
+    session.errexitImmune = true
     return [stdout, flipped, execNode]
   }
 
@@ -513,12 +564,12 @@ export async function executeNode(
     const key = nameNode !== undefined ? nameNode.text : text.slice(0, eq)
     const append = node.children.some((c) => c.type === '+=')
     if (session.readonlyVars.has(key)) {
+      // A bare assignment to a readonly variable is a fatal
+      // variable-assignment error in non-interactive bash: the rest of
+      // the line is abandoned (builtins like `export` merely fail with
+      // 1 and continue).
       const err = new TextEncoder().encode(`bash: ${key}: readonly variable\n`)
-      return [
-        null,
-        new IOResult({ exitCode: 1, stderr: err }),
-        new ExecutionNode({ command: text, exitCode: 1, stderr: err }),
-      ]
+      throw new ExitSignal(1, err, null, 1)
     }
     const valNodes = node.namedChildren.filter(
       (c) => c.type !== NT.VARIABLE_NAME && c.type !== 'subscript',
@@ -593,7 +644,11 @@ export async function executeNode(
       // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
       delete session.arrays[key]
     }
-    return [null, new IOResult(), new ExecutionNode({ command: text, exitCode: 0 })]
+    const assignIo = new IOResult()
+    if (session.shellOptions.xtrace === true) {
+      assignIo.stderr = traceAssignment(key, val, append)
+    }
+    return [null, assignIo, new ExecutionNode({ command: text, exitCode: 0 })]
   }
 
   // Constructs the parser accepts but the executor cannot honor (e.g.

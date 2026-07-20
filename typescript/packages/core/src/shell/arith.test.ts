@@ -91,6 +91,20 @@ describe('evaluateArith', () => {
     expect(() => evaluateArith('r + 1', { r: 'r + 1' })).toThrow(ArithError)
   })
 
+  it('parses base#value literals', () => {
+    expect(evaluateArith('16#ff', {}).value).toBe(255n)
+    expect(evaluateArith('2#101', {}).value).toBe(5n)
+    expect(evaluateArith('8#17', {}).value).toBe(15n)
+    expect(evaluateArith('36#z', {}).value).toBe(35n)
+    expect(evaluateArith('64#_', {}).value).toBe(63n)
+    expect(evaluateArith('16#a + 2#10', {}).value).toBe(12n)
+  })
+
+  it('raises ArithError on bad base literals', () => {
+    expect(() => evaluateArith('2#9', {})).toThrow(ArithError)
+    expect(() => evaluateArith('65#1', {})).toThrow(ArithError)
+  })
+
   it('treats an empty expression as zero', () => {
     expect(evaluateArith('', {})).toEqual({ value: 0n, updates: {} })
   })

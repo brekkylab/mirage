@@ -46,12 +46,38 @@ _PATTERN_OPS = _REPLACE_OPS | _STRIP_OPS | _CASE_OPS
 
 _LITERAL_ARG_TYPES = frozenset({NT.WORD, NT.NUMBER, "regex"})
 
+# Operators that handle unset themselves, so `set -u` must not fire
+# on the lookup that feeds them.
+_UNSET_GUARD_OPS = frozenset({"-", ":-", "+", ":+", "=", ":=", "?", ":?"})
 
-def _lookup_var(var: str, session: Session,
-                call_stack: CallStack | None) -> str:
+
+def _unbound(var: str) -> ExitSignal:
+    # GNU: fatal at top level with status 127; a containing
+    # subshell/pipeline segment reports 1 (same shape as ${var:?}).
+    return ExitSignal(127,
+                      stderr=f"bash: {var}: unbound variable\n".encode(),
+                      contained_code=1)
+
+
+def _lookup_var(var: str,
+                session: Session,
+                call_stack: CallStack | None,
+                strict: bool = True) -> str:
+    """Resolve one variable name to its value.
+
+    Args:
+        var (str): variable name (plain name, digit, or special).
+        session (Session): shell session (env, arrays, positionals).
+        call_stack (CallStack | None): function-call scope, if any.
+        strict (bool): honor ``set -u`` — an unset plain name or
+            positional raises; the defaulting operators (``:-`` family)
+            pass False because they handle unset themselves. Specials
+            (``@ * # ? $ ! 0``) never raise, matching bash >= 4.4.
+    """
     env = session.env
     last_exit_code = session.last_exit_code
     positional = getattr(session, "positional_args", None)
+    nounset = strict and bool(session.shell_options.get("nounset"))
     if var in ("@", "*"):
         if call_stack and call_stack.get_all_positional():
             return " ".join(call_stack.get_all_positional())
@@ -81,6 +107,8 @@ def _lookup_var(var: str, session: Session,
             return call_stack.get_positional(idx)
         if positional and 0 < idx <= len(positional):
             return positional[idx - 1]
+        if nounset:
+            raise _unbound(var)
         return ""
     if call_stack:
         local_val = call_stack.get_local(var)
@@ -94,7 +122,11 @@ def _lookup_var(var: str, session: Session,
         return session.cwd
     if var == "HOME":
         return home_dir(session) or ""
-    return env.get(var, "")
+    if var not in env:
+        if nounset:
+            raise _unbound(var)
+        return ""
+    return env[var]
 
 
 @dataclass(frozen=True, slots=True)
@@ -462,7 +494,10 @@ async def expand_braces(node: tree_sitter.Node, session: Session,
         if not var_in_env:
             # Specials, positionals, PWD/HOME fall back to the shared
             # lookup; set-ness follows value presence.
-            val = _lookup_var(p.var_name, session, call_stack)
+            val = _lookup_var(p.var_name,
+                              session,
+                              call_stack,
+                              strict=p.op not in _UNSET_GUARD_OPS)
             var_in_env = val != ""
 
     if p.indirect_op:

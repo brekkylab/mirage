@@ -17,16 +17,19 @@ import { normalizeFields, redactConfigWithSchema, secretStr, z } from '@struktoa
 export interface SlackConfig {
   token: string
   searchToken?: string
+  baseUrl?: string
 }
 
 export interface SlackConfigRedacted {
   token: '<REDACTED>'
   searchToken?: '<REDACTED>'
+  baseUrl?: string
 }
 
 const SlackConfigSchema = z.object({
   token: secretStr(),
   searchToken: secretStr().optional(),
+  baseUrl: z.string().optional(),
 })
 
 export function redactSlackConfig(config: SlackConfig): SlackConfigRedacted {
@@ -35,6 +38,6 @@ export function redactSlackConfig(config: SlackConfig): SlackConfigRedacted {
 
 export function normalizeSlackConfig(input: Record<string, unknown>): SlackConfig {
   return normalizeFields(input, {
-    rename: { search_token: 'searchToken' },
+    rename: { search_token: 'searchToken', base_url: 'baseUrl' },
   }) as unknown as SlackConfig
 }

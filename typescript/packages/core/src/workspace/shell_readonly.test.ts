@@ -19,9 +19,11 @@ describe('readonly', () => {
   it('blocks reassignment', async () => {
     const { ws } = await makeIntegrationWS()
     try {
-      const out = await run(ws, 'readonly X=1; X=2; echo $X')
-      expect(out).toContain('1')
-      expect(out).not.toContain('2')
+      // A bare assignment to a readonly variable is fatal in
+      // non-interactive bash: the rest of the line is abandoned.
+      const code = await runExit(ws, 'readonly X=1; X=2; echo $X')
+      expect(code).toBe(1)
+      expect(await run(ws, 'echo $X')).toBe('1\n')
     } finally {
       await ws.close()
     }
@@ -39,7 +41,9 @@ describe('readonly', () => {
   it('declare -r blocks reassignment', async () => {
     const { ws } = await makeIntegrationWS()
     try {
-      expect(await run(ws, 'declare -r Y=5; Y=10; echo $Y')).toBe('5\n')
+      const code = await runExit(ws, 'declare -r Y=5; Y=10; echo $Y')
+      expect(code).toBe(1)
+      expect(await run(ws, 'echo $Y')).toBe('5\n')
     } finally {
       await ws.close()
     }

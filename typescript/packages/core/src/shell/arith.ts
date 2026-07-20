@@ -43,7 +43,35 @@ function wrap(value: bigint): bigint {
   return BigInt.asIntN(64, value)
 }
 
+function baseDigit(ch: string, base: number): number {
+  if (ch >= '0' && ch <= '9') return ch.charCodeAt(0) - 48
+  if (ch >= 'a' && ch <= 'z') return ch.charCodeAt(0) - 97 + 10
+  if (ch >= 'A' && ch <= 'Z') {
+    // Below base 37 upper- and lowercase are interchangeable; above,
+    // uppercase continues the digit range (bash base#value rules).
+    return ch.charCodeAt(0) - 65 + (base <= 36 ? 10 : 36)
+  }
+  if (ch === '@') return 62
+  return 63
+}
+
+function parseBaseLiteral(text: string): bigint {
+  const hash = text.indexOf('#')
+  const base = Number(text.slice(0, hash))
+  const digits = text.slice(hash + 1)
+  if (base < 2 || base > 64)
+    throw new ArithError(`invalid arithmetic base (error token is "${text}")`)
+  let value = 0n
+  for (const ch of digits) {
+    const digit = baseDigit(ch, base)
+    if (digit >= base) throw new ArithError(`value too great for base (error token is "${text}")`)
+    value = value * BigInt(base) + BigInt(digit)
+  }
+  return value
+}
+
 function parseLiteral(text: string): bigint {
+  if (text.includes('#')) return parseBaseLiteral(text)
   if (text.toLowerCase().startsWith('0x')) return BigInt(text)
   if (text.startsWith('0') && text !== '0') {
     if (!/^[0-7]+$/.test(text))

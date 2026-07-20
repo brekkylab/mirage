@@ -36,6 +36,7 @@ from pymongo import AsyncMongoClient
 from mirage import MountMode, Workspace
 from mirage.accessor.onedrive import OneDriveConfig
 from mirage.accessor.sharepoint import SharePointConfig
+from mirage.core.google import _client as google_client
 from mirage.core.sharepoint import _resolver as sharepoint_resolver
 from mirage.resource.box import BoxConfig, BoxResource
 from mirage.resource.disk import DiskResource
@@ -54,13 +55,16 @@ from mirage.resource.gsheets.gsheets import GSheetsResource
 from mirage.resource.gslides.config import GSlidesConfig
 from mirage.resource.gslides.gslides import GSlidesResource
 from mirage.resource.hf_buckets import HfBucketsConfig, HfBucketsResource
+from mirage.resource.linear import LinearConfig, LinearResource
 from mirage.resource.nextcloud import NextcloudConfig, NextcloudResource
 from mirage.resource.onedrive.onedrive import OneDriveResource
 from mirage.resource.ram import RAMResource
 from mirage.resource.redis import RedisResource
 from mirage.resource.s3 import S3Config, S3Resource
 from mirage.resource.sharepoint.sharepoint import SharePointResource
+from mirage.resource.slack import SlackConfig, SlackResource
 from mirage.resource.ssh import SSHConfig, SSHResource
+from mirage.resource.trello import TrelloConfig, TrelloResource
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 EMAIL_IMAP_PORT = int(os.environ.get("EMAIL_IMAP_PORT", "3143"))
@@ -216,6 +220,16 @@ def _load_box_server() -> ModuleType:
         Path(__file__).resolve().parents[2] / "server" / "box_server.py")
 
 
+def _load_trello_server() -> ModuleType:
+    return _load_module(
+        Path(__file__).resolve().parents[2] / "server" / "trello_server.py")
+
+
+def _load_linear_server() -> ModuleType:
+    return _load_module(
+        Path(__file__).resolve().parents[2] / "server" / "linear_server.py")
+
+
 async def _admin_exec(ws: Workspace, command: str) -> None:
     result = await ws.execute(command)
     if result.exit_code:
@@ -320,6 +334,16 @@ class NextcloudService:
 FOLDER_MIME = "application/vnd.google-apps.folder"
 
 
+def _use_fake_google_endpoints(url: str) -> None:
+    google_client.TOKEN_URL = f"{url}/token"
+    google_client.DRIVE_API_BASE = f"{url}/drive/v3"
+    google_client.DRIVE_UPLOAD_BASE = f"{url}/upload/drive/v3"
+    google_client.DOCS_API_BASE = f"{url}/v1"
+    google_client.SLIDES_API_BASE = f"{url}/v1"
+    google_client.SHEETS_API_BASE = f"{url}/v4"
+    google_client.GMAIL_API_BASE = f"{url}/gmail/v1"
+
+
 class GwsService:
     """Points gdrive mounts at the fake Google Workspace server.
 
@@ -336,6 +360,7 @@ class GwsService:
     @classmethod
     async def create(cls, run_id: str, target: dict) -> "GwsService":
         url = os.environ["GWS_URL"].rstrip("/")
+        _use_fake_google_endpoints(url)
         folder_ids: dict[str, str] = {}
         drive_ids: dict[str, str] = {}
         # Native mounts (gdocs/gsheets/gslides) render the modified date
@@ -461,32 +486,23 @@ class GwsService:
         return GoogleDriveResource(
             GoogleDriveConfig(client_id="integ",
                               refresh_token="integ",
-                              api_base=self.url,
                               folder_id=self.folder_ids[mount["path"]]))
 
     def gdocs_resource(self) -> GDocsResource:
         return GDocsResource(
-            GDocsConfig(client_id="integ",
-                        refresh_token="integ",
-                        api_base=self.url))
+            GDocsConfig(client_id="integ", refresh_token="integ"))
 
     def gsheets_resource(self) -> GSheetsResource:
         return GSheetsResource(
-            GSheetsConfig(client_id="integ",
-                          refresh_token="integ",
-                          api_base=self.url))
+            GSheetsConfig(client_id="integ", refresh_token="integ"))
 
     def gslides_resource(self) -> GSlidesResource:
         return GSlidesResource(
-            GSlidesConfig(client_id="integ",
-                          refresh_token="integ",
-                          api_base=self.url))
+            GSlidesConfig(client_id="integ", refresh_token="integ"))
 
     def gmail_resource(self) -> GmailResource:
         return GmailResource(
-            GmailConfig(client_id="integ",
-                        refresh_token="integ",
-                        api_base=self.url))
+            GmailConfig(client_id="integ", refresh_token="integ"))
 
     async def teardown(self) -> None:
         return None
@@ -683,6 +699,83 @@ class BoxService:
         await self.runner.cleanup()
 
 
+class SlackService:
+    """Points slack mounts at the shared fake Slack Web API server.
+
+    The server (integ/server/slack.ts) is external, Prisma-backed, and shared
+    across both hosts; /reset re-seeds it to the fixture. The mount uses a
+    user token (xoxp-) so the grep/rg search push-down runs against the fake's
+    search.messages / search.files endpoints.
+
+    Args:
+        url (str): SLACK_URL origin (methods live under /api).
+    """
+
+    def __init__(self, url: str) -> None:
+        self.url = url
+
+    @classmethod
+    async def create(cls) -> "SlackService":
+        url = os.environ["SLACK_URL"].rstrip("/")
+        async with aiohttp.ClientSession() as session:
+            async with session.post(f"{url}/reset") as resp:
+                resp.raise_for_status()
+        return cls(url)
+
+    def resource(self, mount: dict) -> SlackResource:
+        return SlackResource(
+            SlackConfig(token="xoxb-integ",
+                        search_token="xoxp-integ-search",
+                        base_url=f"{self.url}/api"))
+
+    async def teardown(self) -> None:
+        return None
+
+
+class TrelloService:
+
+    def __init__(self, state, runner, base: str) -> None:
+        self.state = state
+        self.runner = runner
+        self.base = base
+
+    @classmethod
+    async def create(cls) -> "TrelloService":
+        module = _load_trello_server()
+        state, _server, runner = await module.start_fake_trello()
+        return cls(state, runner, state.base)
+
+    def resource(self, mount: dict) -> TrelloResource:
+        return TrelloResource(
+            TrelloConfig(api_key="integ-key",
+                         api_token="integ-token",
+                         base_url=self.base))
+
+    async def teardown(self) -> None:
+        await self.runner.cleanup()
+
+
+class LinearService:
+
+    def __init__(self, state, runner, base: str) -> None:
+        self.state = state
+        self.runner = runner
+        self.base = base
+
+    @classmethod
+    async def create(cls) -> "LinearService":
+        module = _load_linear_server()
+        state, _server, runner = await module.start_fake_linear()
+        return cls(state, runner, state.base)
+
+    def resource(self, mount: dict) -> LinearResource:
+        return LinearResource(
+            LinearConfig(api_key="integ-key", base_url=self.base))
+
+    async def teardown(self) -> None:
+        await self.runner.cleanup()
+
+
 def _clear_sharepoint_caches() -> None:
     # The resolver's site/drive id caches are module globals; a fresh
     # fake tenant per run must not see ids from the previous one.
@@ -717,7 +810,8 @@ class SharePointService:
 
 Service = (S3Service | OneDriveService | SharePointService | SSHService
            | NextcloudService | GwsService | HfService | BoxService
-           | DropboxService | GridFSService)
+           | DropboxService | GridFSService | SlackService | TrelloService
+           | LinearService)
 
 
 def build_ram(
@@ -794,6 +888,20 @@ def build_dropbox(
     return service.resource(mount), _noop
 
 
+def build_trello(
+        mount: dict, run_id: str, service: Service | None
+) -> tuple[object, Callable[[], Awaitable[None]]]:
+    assert isinstance(service, TrelloService)
+    return service.resource(mount), _noop
+
+
+def build_linear(
+        mount: dict, run_id: str, service: Service | None
+) -> tuple[object, Callable[[], Awaitable[None]]]:
+    assert isinstance(service, LinearService)
+    return service.resource(mount), _noop
+
+
 def build_ssh(
         mount: dict, run_id: str, service: Service | None
 ) -> tuple[object, Callable[[], Awaitable[None]]]:
@@ -850,6 +958,13 @@ def build_nextcloud(
     return service.resource(mount), _noop
 
 
+def build_slack(
+        mount: dict, run_id: str, service: Service | None
+) -> tuple[object, Callable[[], Awaitable[None]]]:
+    assert isinstance(service, SlackService)
+    return service.resource(mount), _noop
+
+
 BUILDERS = {
     "ram": build_ram,
     "disk": build_disk,
@@ -869,6 +984,9 @@ BUILDERS = {
     "hf": build_hf,
     "box": build_box,
     "dropbox": build_dropbox,
+    "slack": build_slack,
+    "trello": build_trello,
+    "linear": build_linear,
 }
 
 
@@ -898,12 +1016,21 @@ async def open_target(
         service = await BoxService.create(run_id)
     elif target.get("service") == "dropbox":
         service = await DropboxService.create(target)
+    elif target.get("service") == "slack":
+        service = await SlackService.create()
+    elif target.get("service") == "trello":
+        service = await TrelloService.create()
+    elif target.get("service") == "linear":
+        service = await LinearService.create()
     mounts: dict[str, object] = {}
     cleanups: list[Callable[[], Awaitable[None]]] = []
     for mount in target["mounts"]:
         builder = BUILDERS[mount["resource"]]
         resource, cleanup = builder(mount, run_id, service)
-        mounts[mount["path"]] = resource
+        if mount.get("mode") == "read":
+            mounts[mount["path"]] = (resource, MountMode.READ)
+        else:
+            mounts[mount["path"]] = resource
         cleanups.append(cleanup)
     ws = Workspace(mounts, mode=MountMode.WRITE)
 

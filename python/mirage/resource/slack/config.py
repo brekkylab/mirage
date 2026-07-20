@@ -18,3 +18,4 @@ from pydantic import BaseModel, SecretStr
 class SlackConfig(BaseModel):
     token: SecretStr
     search_token: SecretStr | None = None
+    base_url: str = "https://slack.com/api"

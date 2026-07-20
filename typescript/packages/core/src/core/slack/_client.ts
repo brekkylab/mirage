@@ -102,11 +102,14 @@ export class NodeSlackTransport extends HttpSlackTransport {
   constructor(
     private readonly token: string,
     private readonly searchToken?: string,
+    private readonly baseUrlOverride?: string,
   ) {
     super()
   }
   protected baseUrl(): string {
-    return 'https://slack.com/api'
+    return this.baseUrlOverride !== undefined && this.baseUrlOverride !== ''
+      ? this.baseUrlOverride
+      : 'https://slack.com/api'
   }
   protected authHeaders(endpoint?: string): Record<string, string> {
     const token =

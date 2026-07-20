@@ -35,12 +35,15 @@ import {
   GSheetsResource,
   GSlidesResource,
   HfBucketsResource,
+  LinearResource,
   MountMode,
   NextcloudResource,
   RAMResource,
   RedisResource,
   S3Resource,
+  SlackResource,
   SSHResource,
+  TrelloResource,
   Workspace,
 } from '@struktoai/mirage-node'
 import { ImapFlow } from 'imapflow'
@@ -63,25 +66,64 @@ const S3_SECRET = process.env.AWS_SECRET_ACCESS_KEY ?? 'testing'
 const NEXTCLOUD_URL = process.env.NEXTCLOUD_URL
 const NEXTCLOUD_USERNAME = process.env.NEXTCLOUD_USERNAME ?? 'admin'
 const NEXTCLOUD_PASSWORD = process.env.NEXTCLOUD_PASSWORD ?? 'admin123'
+const GOOGLE_API_HOSTS = new Set([
+  'oauth2.googleapis.com',
+  'www.googleapis.com',
+  'docs.googleapis.com',
+  'slides.googleapis.com',
+  'sheets.googleapis.com',
+  'gmail.googleapis.com',
+])
+
+type FetchInput = Parameters<typeof globalThis.fetch>[0]
+type FetchInit = Parameters<typeof globalThis.fetch>[1]
+
+let realFetch: typeof globalThis.fetch | null = null
+let fakeGoogleBase = ''
+
+function redirectGoogleUrl(input: FetchInput): FetchInput {
+  if (typeof input !== 'string' && !(input instanceof URL)) return input
+  const raw = input instanceof URL ? input.href : input
+  if (!raw.startsWith('http://') && !raw.startsWith('https://')) return input
+  const url = new URL(raw)
+  if (!GOOGLE_API_HOSTS.has(url.hostname)) return input
+  return `${fakeGoogleBase}${url.pathname}${url.search}`
+}
+
+function fakeGoogleFetch(input: FetchInput, init?: FetchInit): Promise<Response> {
+  if (realFetch === null) throw new Error('fake Google fetch is not installed')
+  return realFetch(redirectGoogleUrl(input), init)
+}
+
+function useFakeGoogleEndpoints(base: string): void {
+  fakeGoogleBase = base
+  if (realFetch !== null) return
+  realFetch = globalThis.fetch
+  globalThis.fetch = fakeGoogleFetch
+}
 
 function runId(): string {
   return `${String(process.pid)}-${String(Date.now())}`
 }
 
 async function openRam(target: Target): Promise<Open> {
-  const mounts: Record<string, RAMResource> = {}
-  for (const m of target.mounts) mounts[m.path] = new RAMResource()
+  const mounts: Record<string, RAMResource | [RAMResource, MountMode]> = {}
+  for (const m of target.mounts) {
+    const resource = new RAMResource()
+    mounts[m.path] = m.mode === 'read' ? [resource, MountMode.READ] : resource
+  }
   const ws = new Workspace(mounts, { mode: MountMode.WRITE })
   return { ws: ws as unknown as ExecWorkspace, cleanup: () => ws.close() }
 }
 
 async function openDisk(target: Target): Promise<Open> {
   const roots: string[] = []
-  const mounts: Record<string, DiskResource> = {}
+  const mounts: Record<string, DiskResource | [DiskResource, MountMode]> = {}
   for (const m of target.mounts) {
     const root = mkdtempSync(join(tmpdir(), 'mirage-integ-disk-'))
     roots.push(root)
-    mounts[m.path] = new DiskResource({ root })
+    const resource = new DiskResource({ root })
+    mounts[m.path] = m.mode === 'read' ? [resource, MountMode.READ] : resource
   }
   const ws = new Workspace(mounts, { mode: MountMode.WRITE })
   const cleanup = async (): Promise<void> => {
@@ -592,10 +634,9 @@ async function seedGwsMail(base: string, entries: MailEntry[]): Promise<void> {
 }
 
 function gwsNativeResource(
-  base: string,
   resource: string,
 ): GDocsResource | GSheetsResource | GSlidesResource | GmailResource {
-  const config = { clientId: 'integ', clientSecret: 'integ', refreshToken: 'integ', apiBase: base }
+  const config = { clientId: 'integ', clientSecret: 'integ', refreshToken: 'integ' }
   if (resource === 'gdocs') return new GDocsResource(config)
   if (resource === 'gsheets') return new GSheetsResource(config)
   if (resource === 'gmail') return new GmailResource(config)
@@ -606,6 +647,7 @@ async function openGws(target: Target): Promise<Open> {
   let base = process.env.GWS_URL ?? ''
   while (base.endsWith('/')) base = base.slice(0, -1)
   if (base === '') throw new Error('gdrive target requires GWS_URL')
+  useFakeGoogleEndpoints(base)
   // Native mounts (gdocs/gsheets/gslides) render the modified date into
   // filenames, so those targets pin the server clock.
   await gwsJson(`${base}/reset`, {
@@ -624,7 +666,7 @@ async function openGws(target: Target): Promise<Open> {
       continue
     }
     if (m.resource !== 'gdrive') {
-      mounts[m.path] = gwsNativeResource(base, m.resource)
+      mounts[m.path] = gwsNativeResource(m.resource)
       continue
     }
     // A mount may live inside a Shared Drive: the drive is created once
@@ -646,7 +688,6 @@ async function openGws(target: Target): Promise<Open> {
       clientId: 'integ',
       clientSecret: 'integ',
       refreshToken: 'integ',
-      apiBase: base,
       folderId: parent,
     })
   }
@@ -663,6 +704,67 @@ async function openGws(target: Target): Promise<Open> {
     await ws.close()
   }
   return { ws: ws as unknown as ExecWorkspace, cleanup }
+}
+
+// The fake Slack Web API server is external and shared across both hosts;
+// /reset re-seeds it to the fixture. A user token (xoxp-) enables the grep/rg
+// search push-down against the fake's search.messages / search.files.
+async function openSlack(target: Target): Promise<Open> {
+  let base = process.env.SLACK_URL ?? ''
+  while (base.endsWith('/')) base = base.slice(0, -1)
+  if (base === '') throw new Error('slack target requires SLACK_URL')
+  const reset = await fetch(`${base}/reset`, { method: 'POST' })
+  if (!reset.ok) throw new Error(`slack /reset failed: ${String(reset.status)}`)
+  const mounts: Record<string, SlackResource> = {}
+  for (const m of target.mounts) {
+    mounts[m.path] = new SlackResource({
+      token: 'xoxb-integ',
+      searchToken: 'xoxp-integ-search',
+      baseUrl: `${base}/api`,
+    })
+  }
+  const ws = new Workspace(mounts, { mode: MountMode.WRITE })
+  const cleanup = async (): Promise<void> => {
+    await ws.close()
+  }
+  return { ws: ws as unknown as ExecWorkspace, cleanup }
+}
+
+async function openTrello(target: Target): Promise<Open> {
+  const endpoint = process.env.TRELLO_ENDPOINT
+  if (!endpoint) throw new Error('trello target requires TRELLO_ENDPOINT')
+  const mounts: Record<string, TrelloResource | RAMResource> = {}
+  for (const m of target.mounts) {
+    if (m.resource === 'ram') {
+      mounts[m.path] = new RAMResource()
+      continue
+    }
+    mounts[m.path] = new TrelloResource({
+      apiKey: 'integ-key',
+      apiToken: 'integ-token',
+      baseUrl: endpoint,
+    })
+  }
+  const ws = new Workspace(mounts, { mode: MountMode.WRITE })
+  return { ws: ws as unknown as ExecWorkspace, cleanup: () => ws.close() }
+}
+
+async function openLinear(target: Target): Promise<Open> {
+  const endpoint = process.env.LINEAR_ENDPOINT
+  if (!endpoint) throw new Error('linear target requires LINEAR_ENDPOINT')
+  const mounts: Record<string, LinearResource | RAMResource> = {}
+  for (const m of target.mounts) {
+    if (m.resource === 'ram') {
+      mounts[m.path] = new RAMResource()
+      continue
+    }
+    mounts[m.path] = new LinearResource({
+      apiKey: 'integ-key',
+      baseUrl: endpoint,
+    })
+  }
+  const ws = new Workspace(mounts, { mode: MountMode.WRITE })
+  return { ws: ws as unknown as ExecWorkspace, cleanup: () => ws.close() }
 }
 
 export const ADAPTERS: Record<string, (target: Target) => Promise<Open>> = {
@@ -683,4 +785,7 @@ export const ADAPTERS: Record<string, (target: Target) => Promise<Open>> = {
   hf: openHf,
   box: openBox,
   dropbox: openDropbox,
+  slack: openSlack,
+  trello: openTrello,
+  linear: openLinear,
 }

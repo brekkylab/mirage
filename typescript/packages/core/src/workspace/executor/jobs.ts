@@ -154,6 +154,49 @@ export async function handleWait(jobTable: JobTable, parts: string[]): Promise<J
   return [job.stdout, io, new ExecutionNode({ command: cmdStr, exitCode: job.exitCode })]
 }
 
+/**
+ * Foreground a background job: print its command line, then block on it
+ * and adopt its output and exit code.
+ */
+export async function handleFg(jobTable: JobTable, parts: string[]): Promise<JobHandlerResult> {
+  const cmdStr = parts.join(' ')
+  let jobId: number
+  if (parts.length <= 1) {
+    const running = jobTable.runningJobs()
+    const current = running[running.length - 1]
+    if (current === undefined) {
+      const err = new TextEncoder().encode('fg: current: no such job\n')
+      return [
+        null,
+        new IOResult({ exitCode: 1, stderr: err }),
+        new ExecutionNode({ command: cmdStr, exitCode: 1, stderr: err }),
+      ]
+    }
+    jobId = current.id
+  } else {
+    const raw = (parts[1] ?? '').replace(/^%+/, '')
+    jobId = Number(raw)
+    if (!Number.isInteger(jobId) || jobTable.get(jobId) === null) {
+      const err = new TextEncoder().encode(`fg: ${parts[1] ?? ''}: no such job\n`)
+      return [
+        null,
+        new IOResult({ exitCode: 1, stderr: err }),
+        new ExecutionNode({ command: cmdStr, exitCode: 1, stderr: err }),
+      ]
+    }
+  }
+  const job = await jobTable.wait(jobId)
+  const header = new TextEncoder().encode(job.command + '\n')
+  const stdout = new Uint8Array(header.byteLength + job.stdout.byteLength)
+  stdout.set(header, 0)
+  stdout.set(job.stdout, header.byteLength)
+  const io = new IOResult({
+    exitCode: job.exitCode,
+    stderr: job.stderr.byteLength > 0 ? job.stderr : null,
+  })
+  return [stdout, io, new ExecutionNode({ command: cmdStr, exitCode: job.exitCode })]
+}
+
 export function handleKill(jobTable: JobTable, parts: string[]): JobHandlerResult {
   const cmdStr = parts.join(' ')
   if (parts.length < 2) {

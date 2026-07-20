@@ -44,7 +44,11 @@ async def handle_source(
         script = data.decode(errors="replace")
     else:
         script = ""
-    io = await execute_fn(script, session_id=session.session_id)
+    session.source_depth += 1
+    try:
+        io = await execute_fn(script, session_id=session.session_id)
+    finally:
+        session.source_depth -= 1
     return io.stdout, io, ExecutionNode(command=f"source {raw}",
                                         exit_code=io.exit_code)
 

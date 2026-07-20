@@ -116,6 +116,15 @@ async def expand_argv(
                                 registry,
                                 session.cwd,
                                 word_kinds=word_kinds)
+    # set -f: glob words become literal paths for every consumer,
+    # including backend pushdown, so `cat *.txt` looks up a file
+    # literally named `*.txt` like bash with noglob.
+    if session.shell_options.get("noglob"):
+        classified = [
+            dataclasses.replace(item, pattern=None) if
+            (isinstance(item, PathSpec) and item.pattern) else item
+            for item in classified
+        ]
     # A glob word is resolved by whoever consumes it, exactly once:
     # WordPolicy.SHELL words get matches here; mount commands keep
     # patterns for backend pushdown; unknown names fail without
