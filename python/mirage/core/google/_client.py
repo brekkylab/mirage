@@ -14,11 +14,14 @@
 
 import asyncio
 import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 import aiohttp
 
 from mirage.core.google.config import GoogleConfig
+from mirage.core.http_session import current_http_session
 from mirage.resource.secrets import reveal_secret
 
 TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -29,6 +32,16 @@ SHEETS_API_BASE = "https://sheets.googleapis.com/v4"
 GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1"
 DRIVE_UPLOAD_BASE = "https://www.googleapis.com/upload/drive/v3"
 TOKEN_BUFFER_SECONDS = 300
+
+
+@asynccontextmanager
+async def _session_scope() -> AsyncIterator[aiohttp.ClientSession]:
+    shared = current_http_session()
+    if shared is not None:
+        yield shared
+    else:
+        async with aiohttp.ClientSession() as session:
+            yield session
 
 
 def token_url(config: GoogleConfig) -> str:
@@ -82,7 +95,7 @@ async def refresh_access_token(config: GoogleConfig, ) -> tuple[str, int]:
     client_secret = reveal_secret(config.client_secret)
     if client_secret:
         data["client_secret"] = client_secret
-    async with aiohttp.ClientSession() as session:
+    async with _session_scope() as session:
         async with session.post(token_url(config), data=data) as resp:
             resp.raise_for_status()
             body = await resp.json()
@@ -120,7 +133,7 @@ async def google_get(
     params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     headers = await google_headers(token_manager)
-    async with aiohttp.ClientSession() as session:
+    async with _session_scope() as session:
         async with session.get(url, headers=headers, params=params) as resp:
             resp.raise_for_status()
             return await resp.json()
@@ -132,7 +145,7 @@ async def google_post(
     json: dict[str, Any],
 ) -> dict[str, Any]:
     headers = await google_headers(token_manager)
-    async with aiohttp.ClientSession() as session:
+    async with _session_scope() as session:
         async with session.post(url, headers=headers, json=json) as resp:
             resp.raise_for_status()
             return await resp.json()
@@ -144,7 +157,7 @@ async def google_put(
     json: dict[str, Any],
 ) -> dict[str, Any]:
     headers = await google_headers(token_manager)
-    async with aiohttp.ClientSession() as session:
+    async with _session_scope() as session:
         async with session.put(url, headers=headers, json=json) as resp:
             resp.raise_for_status()
             return await resp.json()
@@ -157,7 +170,7 @@ async def google_patch(
     params: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     headers = await google_headers(token_manager)
-    async with aiohttp.ClientSession() as session:
+    async with _session_scope() as session:
         async with session.patch(url,
                                  headers=headers,
                                  json=json,
@@ -186,7 +199,7 @@ async def google_send_bytes(
     """
     headers = await google_headers(token_manager)
     headers["Content-Type"] = content_type
-    async with aiohttp.ClientSession() as session:
+    async with _session_scope() as session:
         async with session.request(method,
                                    url,
                                    headers=headers,
@@ -201,7 +214,7 @@ async def google_delete(
     url: str,
 ) -> None:
     headers = await google_headers(token_manager)
-    async with aiohttp.ClientSession() as session:
+    async with _session_scope() as session:
         async with session.delete(url, headers=headers) as resp:
             resp.raise_for_status()
 
@@ -211,7 +224,7 @@ async def google_get_bytes(
     url: str,
 ) -> bytes:
     headers = await google_headers(token_manager)
-    async with aiohttp.ClientSession() as session:
+    async with _session_scope() as session:
         async with session.get(url, headers=headers) as resp:
             resp.raise_for_status()
             return await resp.read()

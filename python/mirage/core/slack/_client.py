@@ -12,14 +12,27 @@
 # limitations under the License.
 # ========= Copyright 2026 @ Strukto.AI All Rights Reserved. =========
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 import aiohttp
 
+from mirage.core.http_session import current_http_session
 from mirage.resource.secrets import reveal_secret
 from mirage.resource.slack.config import SlackConfig
 
 SLACK_API = "https://slack.com/api"
+
+
+@asynccontextmanager
+async def _session_scope() -> AsyncIterator[aiohttp.ClientSession]:
+    shared = current_http_session()
+    if shared is not None:
+        yield shared
+    else:
+        async with aiohttp.ClientSession() as session:
+            yield session
 
 
 def _auth_token(config: SlackConfig, method: str) -> str:
@@ -64,7 +77,7 @@ async def slack_get(
 ) -> dict[str, Any]:
     url = f"{SLACK_API}/{method}"
     headers = slack_headers(config, method)
-    async with aiohttp.ClientSession() as session:
+    async with _session_scope() as session:
         async with session.get(url, headers=headers, params=params) as resp:
             data = await resp.json()
             if not data.get("ok"):
@@ -79,7 +92,7 @@ async def slack_post(
 ) -> dict[str, Any]:
     url = f"{SLACK_API}/{method}"
     headers = slack_headers(config, method)
-    async with aiohttp.ClientSession() as session:
+    async with _session_scope() as session:
         async with session.post(url, headers=headers, json=body or {}) as resp:
             data = await resp.json()
             if not data.get("ok"):

@@ -30,6 +30,8 @@ from mirage.commands.builtin.utils.safeguard import (CommandTimeoutError,
                                                      run_with_timeout)
 from mirage.commands.errors import FindParseError, UsageError
 from mirage.commands.safeguard import CommandSafeguard, resolve_safeguard
+from mirage.core.http_session import (PooledSession, bind_shared_session,
+                                      reset_shared_session)
 from mirage.io import IOResult
 from mirage.io.types import ByteSource, materialize
 from mirage.observe.context import RecordingScope
@@ -186,6 +188,7 @@ class Workspace:
         self._closed = False
         self._async_closed = False
         self._close_lock = asyncio.Lock()
+        self._http_session = PooledSession()
         # Resources reused from another live workspace (copy() / load
         # resource overrides) stay open here; their origin closes them.
         self._shared_resources: set[int] = set()
@@ -654,6 +657,7 @@ class Workspace:
                                    for resource in resources.values()))
             if self._owns_state_store:
                 await self._state_store.close()
+            await self._http_session.aclose()
             self._close_parts()
             for task in drain_tasks:
                 try:
@@ -1162,6 +1166,7 @@ class Workspace:
         is_line = record and not provision
         scope = RecordingScope(active=is_line)
 
+        http_token = bind_shared_session(self._http_session.get)
         session_token = set_current_session(effective_session)
         try:
             ast = parse(command)
@@ -1251,6 +1256,7 @@ class Workspace:
             # emitted them succeeded.
             scope.close()
             reset_current_session(session_token)
+            reset_shared_session(http_token)
             await self._session_mgr.flush()
             self._ops.records.extend(scope.records)
             if is_line:
